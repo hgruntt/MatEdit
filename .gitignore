@@ -1,0 +1,67 @@
+# Visual Studio / MSVC
+.vs/
+*.opensdf
+*.sdf
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# CMake build directories
+build/
+out/
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Compiled Modules
+*.mod
+*.smod
+
+# Executables
+*.exe
+*.out
+*.app
+*.pdb
+*.ilk
+*.exp
+
+# Debug / Release output directories
+Debug/
+Release/
+x64/
+Win32/
+
+# IDE / Editor specific
+.vscode/
+*.swp
+*.swo
+*~
+.idea/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# User specific config or data files generated at runtime
+imgui.ini
+editor_config.txt
