@@ -329,6 +329,136 @@ struct Material {
     }
 };
 
+struct PhysicalMaterialEntry {
+    std::string name;
+    std::map<std::string, std::vector<std::string>> multiParams;
+
+    char impactDecal[128] = "";
+    char impactPartsBuf[256] = "";
+    char impactSoundBuf[512] = "";
+    char stepSoundBuf[1024] = "";
+
+    void updateBuffers() {
+        impactDecal[0] = '\0';
+        impactPartsBuf[0] = '\0';
+        impactSoundBuf[0] = '\0';
+        stepSoundBuf[0] = '\0';
+
+        auto joinVec = [](const std::vector<std::string>& vec) {
+            std::string res;
+            for (size_t i = 0; i < vec.size(); ++i) {
+                res += vec[i];
+                if (i + 1 < vec.size()) res += " ";
+            }
+            return res;
+        };
+
+        for (auto& [key, vals] : multiParams) {
+            std::string joined = joinVec(vals);
+            if (key == "impact_decal") strncpy(impactDecal, vals.empty() ? "" : vals[0].c_str(), sizeof(impactDecal) - 1);
+            if (key == "impact_parts") strncpy(impactPartsBuf, joined.c_str(), sizeof(impactPartsBuf) - 1);
+            if (key == "impact_sound") strncpy(impactSoundBuf, joined.c_str(), sizeof(impactSoundBuf) - 1);
+            if (key == "step_sound") strncpy(stepSoundBuf, joined.c_str(), sizeof(stepSoundBuf) - 1);
+        }
+    }
+
+    void syncParams() {
+        auto splitToVec = [](const std::string& str) {
+            std::vector<std::string> res;
+            std::stringstream ss(str);
+            std::string item;
+            while (ss >> item) {
+                res.push_back(item);
+            }
+            return res;
+        };
+
+        if (strlen(impactDecal) > 0) multiParams["impact_decal"] = {impactDecal};
+        else multiParams.erase("impact_decal");
+
+        std::vector<std::string> parts = splitToVec(impactPartsBuf);
+        if (!parts.empty()) multiParams["impact_parts"] = parts;
+        else multiParams.erase("impact_parts");
+
+        std::vector<std::string> impSounds = splitToVec(impactSoundBuf);
+        if (!impSounds.empty()) multiParams["impact_sound"] = impSounds;
+        else multiParams.erase("impact_sound");
+
+        std::vector<std::string> stepSounds = splitToVec(stepSoundBuf);
+        if (!stepSounds.empty()) multiParams["step_sound"] = stepSounds;
+        else multiParams.erase("step_sound");
+    }
+};
+
+void LoadAllPhysicalMaterials(const std::string& path, std::vector<PhysicalMaterialEntry>& physMats) {
+    physMats.clear();
+    fs::path fullPath = fs::path(path).is_absolute() ? fs::path(path) : (gameRootPath / path);
+    std::ifstream file(fullPath);
+    if (!file.is_open()) return;
+
+    std::string line, lastLine;
+    PhysicalMaterialEntry* currentMat = nullptr;
+
+    while (std::getline(file, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+
+        if (line.find('{') != std::string::npos) {
+            physMats.emplace_back();
+            currentMat = &physMats.back();
+            size_t n1 = lastLine.find('\"');
+            size_t n2 = lastLine.find('\"', n1 + 1);
+            if (n1 != std::string::npos && n2 != std::string::npos) {
+                currentMat->name = lastLine.substr(n1 + 1, n2 - n1 - 1);
+            } else {
+                currentMat->name = "Unnamed";
+            }
+        } else if (line.find('}') != std::string::npos) {
+            if (currentMat) currentMat->updateBuffers();
+            currentMat = nullptr;
+        } else if (currentMat) {
+            size_t q1 = line.find('\"');
+            if (q1 == std::string::npos) continue;
+            size_t q2 = line.find('\"', q1 + 1);
+            if (q2 == std::string::npos) continue;
+            std::string key = line.substr(q1 + 1, q2 - q1 - 1);
+
+            std::vector<std::string> values;
+            size_t searchPos = q2 + 1;
+            while (true) {
+                size_t v1 = line.find('\"', searchPos);
+                if (v1 == std::string::npos) break;
+                size_t v2 = line.find('\"', v1 + 1);
+                if (v2 == std::string::npos) break;
+                values.push_back(line.substr(v1 + 1, v2 - v1 - 1));
+                searchPos = v2 + 1;
+            }
+            if (!values.empty()) {
+                currentMat->multiParams[key] = values;
+            }
+        } else {
+            if (!line.empty()) lastLine = line;
+        }
+    }
+}
+
+void SaveAllPhysicalMaterials(const std::string& path, const std::vector<PhysicalMaterialEntry>& physMats) {
+    fs::path fullPath = fs::path(path).is_absolute() ? fs::path(path) : (gameRootPath / path);
+    std::ofstream file(fullPath);
+    if (!file.is_open()) return;
+
+    for (const auto& mat : physMats) {
+        file << "\"" << mat.name << "\"\n{\n";
+        for (const auto& [key, vals] : mat.multiParams) {
+            file << "\t\"" << key << "\"";
+            for (const auto& v : vals) {
+                file << "\t\"" << v << "\"";
+            }
+            file << "\n";
+        }
+        file << "}\n";
+    }
+}
+
 void SaveAllMaterials(const std::string& path, const std::vector<Material>& materials) {
     fs::path fullPath = fs::path(path).is_absolute() ? fs::path(path) : (gameRootPath / path);
     std::ofstream file(fullPath);
@@ -427,6 +557,21 @@ int main() {
         return -1;
     }
 
+    // Переменные для вкладки Physical Materials (.def)
+    std::vector<PhysicalMaterialEntry> physicalMaterials;
+    std::string currentDefFile = "scripts/materials.def";
+    int currentPhysMatIndex = 0;
+
+    // Переменные состояния для UI
+    int shapeType = 0;
+    int lightMode = 0;
+    bool useNormal = true;
+    bool useGloss = true;
+    bool useLuma = true;
+    glm::vec3 lightPos(2.0f, 2.0f, 2.0f);
+    float lightIntensity = 1.0f;
+    float lightColor[3] = {1.0f, 1.0f, 1.0f};
+
     auto refreshData = [&](std::string& currFile, int& currIndex) {
         materials.clear();
         matFiles.clear();
@@ -457,10 +602,21 @@ int main() {
         } else {
             currFile = "None";
         }
+
+        // Загрузка physical materials (.def)
+        fs::path defPath = scriptsDir / "materials.def";
+        if (!fs::exists(defPath)) defPath = gameRootPath / "materials.def";
+        if (fs::exists(defPath)) {
+            currentDefFile = fs::relative(defPath, gameRootPath).string();
+            LoadAllPhysicalMaterials(currentDefFile, physicalMaterials);
+            currentPhysMatIndex = 0;
+            if (!physicalMaterials.empty()) physicalMaterials[currentPhysMatIndex].updateBuffers();
+        }
     };
 
     std::string currentFileName = "None";
     int currentMatIndex = 0;
+
     refreshData(currentFileName, currentMatIndex);
 
     GLuint shader = LoadShader("basic.vert", "basic.frag");
@@ -493,7 +649,7 @@ int main() {
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float))); glEnableVertexAttribArray(1);
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float))); glEnableVertexAttribArray(2);
     
-    
+
     // --- Инициализация ImGui ---
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -583,8 +739,6 @@ int main() {
     glUniform1i(glGetUniformLocation(shader, "normalMap"), 1);
     glUniform1i(glGetUniformLocation(shader, "glossMap"), 2);
 
-    static int shapeType = 0;
-
    while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
         // 1. Старт кадра ImGui
@@ -596,7 +750,7 @@ int main() {
         int display_w, display_h;
         glfwGetFramebufferSize(window, &display_w, &display_h);
         ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImVec2((float)display_w, 100));
+        ImGui::SetNextWindowSize(ImVec2((float)display_w, 85));
         ImGui::Begin("Game Root Directory:", nullptr,
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoResize |
@@ -621,166 +775,283 @@ int main() {
                 skyboxID = LoadSkyboxAs2D("textures/sky");
             }
         }
-        ImGui::End();
-
-        ImGui::SetNextWindowPos(ImVec2(0, display_h - 200));
-        ImGui::SetNextWindowSize(ImVec2((float)display_w/3, 200));
-        ImGui::Begin("Material Files Data", nullptr,
-            ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoCollapse);
-
-        if (!matFiles.empty()) {
-        if (ImGui::BeginCombo("Select .mat File", currentFileName.c_str())) {
-            for (int n = 0; n < matFiles.size(); n++) {
-                if (ImGui::Selectable(matFiles[n].c_str(), currentFileName == matFiles[n])) {
-                    currentFileName = matFiles[n];
-                        editorCfg.lastMatFile = currentFileName;
-                                            materials.clear();
-                                            LoadAllMaterials(currentFileName, materials);
-                                            currentMatIndex = 0;
-                                            if(!materials.empty()) materials[currentMatIndex].loadTextures();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-        } else {
-            ImGui::TextColored(ImVec4(1,0,0,1), "No .mat files found!\nCheck Game Root Directory.");
+                ImGui::SameLine();
+        if (ImGui::Button("Create .mat")) {
+            ImGui::OpenPopup("New .mat");
         }
-
-        if (!materials.empty() && currentMatIndex < materials.size()) {
-            static char nameBuffer[128];
-            // Инициализируем буфер при первом запуске
-            static int lastMatIndex = -1;
-            if (lastMatIndex != currentMatIndex) {
-                strncpy(nameBuffer, materials[currentMatIndex].name.c_str(), 127);
-                lastMatIndex = currentMatIndex;
-            }
-            if (ImGui::BeginCombo("Select Material", materials[currentMatIndex].name.c_str())) {
-                for (int n = 0; n < materials.size(); n++) {
-                    if (ImGui::Selectable(materials[n].name.c_str(), currentMatIndex == n)) {
-                        currentMatIndex = n;
-                        materials[currentMatIndex].loadTextures();
-                    }
-                }
-                ImGui::EndCombo();
-            }
-
-            if (ImGui::InputText("Material Name", nameBuffer, 128)) {
-                materials[currentMatIndex].name = nameBuffer;
-            }
-            Material& mat = materials[currentMatIndex];
-            if (ImGui::InputText("Diffuse Path", mat.diffusePath, 256)) {}
-            ImGui::InputText("Normal", mat.normalPath, 256);
-            ImGui::InputText("Gloss", mat.glossPath, 256);
-            ImGui::InputText("Luma", mat.lumaPath, 256);
-            ImGui::InputText("Detail", mat.detailPath, 256);
+        ImGui::SameLine();
+        if (ImGui::Button("Create .def")) {
+            ImGui::OpenPopup("New .def");
         }
-        ImGui::End();
+        // Попап окно для создания нового .mat файла
+        if (ImGui::BeginPopupModal("New .mat", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char newMatFileName[128] = "new_materials";
+            ImGui::Text("Enter new .mat file name (inside scripts/ or root):");
+            ImGui::InputText("##newMatFileName", newMatFileName, sizeof(newMatFileName));
 
-        ImGui::SetNextWindowPos(ImVec2(0+(float)display_w/3, display_h - 200));
-        ImGui::SetNextWindowSize(ImVec2((float)display_w/3, 200));
-        ImGui::Begin("Material Parameters", nullptr,
-            ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoCollapse);
+            if (ImGui::Button("Create", ImVec2(120, 0))) {
+                std::string fileNameStr = std::string(newMatFileName);
+                if (fileNameStr.find(".mat") == std::string::npos) {
+                    fileNameStr += ".mat";
+                }
 
-        if (!materials.empty() && currentMatIndex < materials.size()) {
-            Material& mat = materials[currentMatIndex];
-            ImGui::Text("Parameters");
-            ImGui::SliderFloat("Smoothness", &mat.smoothness, 0.0f, 1.0f);
-            ImGui::SliderFloat("Reflect", &mat.reflectScale, 0.0f, 1.0f);
-            ImGui::SliderFloat("Refract", &mat.refractScale, 0.0f, 1.0f);
-            ImGui::SliderFloat("Aberration", &mat.aberrationScale, 0.0f, 0.1f);
-            ImGui::SliderFloat("Relief", &mat.reliefScale, 0.0f, 1.0f);
-            ImGui::InputInt("SwayHeight", &mat.swayHeight);
-            ImGui::InputText("Detail Scale", mat.detailScale, 64);
-            std::vector<const char*> physMatPtrs;
-            for (const auto& s : physicalMaterialTypes) {
-                physMatPtrs.push_back(s.c_str());
-            }
+                fs::path targetDir = gameRootPath / "scripts";
+                if (!fs::exists(targetDir)) {
+                    fs::create_directories(targetDir);
+                }
+                fs::path fullMatPath = targetDir / fileNameStr;
 
-            if (ImGui::Combo("Phys Material", &mat.matTypeIndex, physMatPtrs.data(), static_cast<int>(physMatPtrs.size()))) {
-                if (mat.matTypeIndex >= 0 && mat.matTypeIndex < physicalMaterialTypes.size()) {
-                    for(auto& p : mat.params) {
-                        if(p.first == "material") p.second = physicalMaterialTypes[mat.matTypeIndex];
+                if (!fs::exists(fullMatPath)) {
+                    std::ofstream newFile(fullMatPath);
+                    if (newFile.is_open()) {
+                        newFile << "\"default_material\"\n{\n\t\"diffuseMap\"\t\"textures/default\"\n\t\"smoothness\"\t\"1.0\"\n}\n";
+                        newFile.close();
                     }
                 }
-            }
-            if (ImGui::Button("Apply Changes")) {
-                for(auto& p : mat.params) {
-                    if(p.first == "diffuseMap") p.second = mat.diffusePath;
-                    if(p.first == "normalMap") p.second = mat.normalPath;
-                    if(p.first == "glossMap") p.second = mat.glossPath;
-                    if(p.first == "LumaMap") p.second = mat.lumaPath;
-                    if(p.first == "detailmap") p.second = mat.detailPath;
-                    if(p.first == "smoothness") p.second = std::to_string(mat.smoothness);
-                    if(p.first == "reflectScale") p.second = std::to_string(mat.reflectScale);
-                    if(p.first == "refractScale") p.second = std::to_string(mat.refractScale);
-                    if(p.first == "aberrationScale") p.second = std::to_string(mat.aberrationScale);
-                    if(p.first == "reliefScale") p.second = std::to_string(mat.reliefScale);
-                    if(p.first == "swayHeight") p.second = std::to_string(mat.swayHeight);
-                    if(p.first == "detailScale") p.second = mat.detailScale;
-                    if(p.first == "material" && mat.matTypeIndex >= 0 && mat.matTypeIndex < physicalMaterialTypes.size()) {
-                        p.second = physicalMaterialTypes[mat.matTypeIndex];
-                    }
-                }
-                mat.syncParams();
-                mat.loadTextures();
+
+                refreshData(currentFileName, currentMatIndex);
+                ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Save All")) {
-               if (!materials.empty()) {
-                    materials[currentMatIndex].syncParams();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+          // Попап для создания нового .def файла
+        if (ImGui::BeginPopupModal("New .def", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char newDefFileName[128] = "materials.def";
+            ImGui::Text("Enter new .def file name (inside scripts/ or root):");
+            ImGui::InputText("##newDefFileName", newDefFileName, sizeof(newDefFileName));
+
+            if (ImGui::Button("Create", ImVec2(120, 0))) {
+                std::string fileNameStr = std::string(newDefFileName);
+                if (fileNameStr.find(".def") == std::string::npos) fileNameStr += ".def";
+
+                fs::path targetDir = gameRootPath / "scripts";
+                if (!fs::exists(targetDir)) fs::create_directories(targetDir);
+                fs::path fullDefPath = targetDir / fileNameStr;
+
+                if (!fs::exists(fullDefPath)) {
+                    std::ofstream newFile(fullDefPath);
+                    if (newFile.is_open()) {
+                        newFile << "\"default\"\n{\n\t\"impact_decal\"\t\"shot\"\n\t\"impact_sound\"\t\"debris/concrete1.wav\"\n}\n";
+                        newFile.close();
+                    }
                 }
-                SaveAllMaterials(currentFileName, materials);
+                refreshData(currentFileName, currentMatIndex);
+                ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Add New Material")) {
-                Material newMat;
-                newMat.name = "NewMaterial_" + std::to_string(materials.size());
-                newMat.params.push_back({"diffuseMap", "textures/default"});
-                newMat.params.push_back({"normalMap", "textures/default_norm"});
-                newMat.params.push_back({"smoothness", "1.0"});
-                newMat.updateBuffers();
-
-                materials.push_back(newMat);
-                currentMatIndex = static_cast<int>(materials.size()) - 1;
-            }
-        } else {
-            ImGui::Text("Select a valid material file.");
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
         }
-        ImGui::Separator();
-        ImGui::Combo("Model", &shapeType, "Cube\0Sphere\0");
+
         ImGui::End();
-        
-        ImGui::SetNextWindowPos(ImVec2(0+(float)display_w/3+(float)display_w/3, display_h - 200));
-        ImGui::SetNextWindowSize(ImVec2((float)display_w/3, 200));
-        ImGui::Begin("Light Parameters", nullptr,
+
+        ImGui::SetNextWindowPos(ImVec2(0, display_h - 220));
+        ImGui::SetNextWindowSize(ImVec2((float)display_w, 220));
+            ImGui::Begin("Editor Panels", nullptr,
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoCollapse);
-        static bool useNormal = true;
-        static bool useGloss = true;
-        static bool useLuma = true;
+            ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoTitleBar);
 
-        ImGui::Checkbox("Enable Normal Map", &useNormal);
-        ImGui::Checkbox("Enable Gloss Map", &useGloss);
-        ImGui::Checkbox("Enable Luma Map", &useLuma);
+        if (ImGui::BeginTabBar("EditorTabs", ImGuiTabBarFlags_None)) {
+            
+            // Вкладка 1: Визуальные материалы (.mat)
+            if (ImGui::BeginTabItem("Visual Materials (.mat)")) {
+                float colWidth = (float)display_w / 3.0f;
+                
+                // Левая колончатость внутри вкладки
+                ImGui::BeginChild("MatFilesChild", ImVec2(colWidth - 10, 170), true);
+                ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Material Files");
+                if (!matFiles.empty()) {
+                    if (ImGui::BeginCombo("Select .mat File", currentFileName.c_str())) {
+                        for (int n = 0; n < matFiles.size(); n++) {
+                            if (ImGui::Selectable(matFiles[n].c_str(), currentFileName == matFiles[n])) {
+                                currentFileName = matFiles[n];
+                                editorCfg.lastMatFile = currentFileName;
+                                materials.clear();
+                                LoadAllMaterials(currentFileName, materials);
+                                currentMatIndex = 0;
+                                if(!materials.empty()) materials[currentMatIndex].loadTextures();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(1,0,0,1), "No .mat files found!");
+                }
 
-        ImGui::Separator();
-        ImGui::Text("Light Settings");
-        static int lightMode = 0;
-        ImGui::Combo("Light Mode", &lightMode, "Camera\0Fixed\0");
+                if (!materials.empty() && currentMatIndex < materials.size()) {
+                    static char nameBuffer[128];
+                    static int lastMatIndex = -1;
+                    if (lastMatIndex != currentMatIndex) {
+                        strncpy(nameBuffer, materials[currentMatIndex].name.c_str(), 127);
+                        lastMatIndex = currentMatIndex;
+                    }
+                    if (ImGui::BeginCombo("Select Material", materials[currentMatIndex].name.c_str())) {
+                        for (int n = 0; n < materials.size(); n++) {
+                            if (ImGui::Selectable(materials[n].name.c_str(), currentMatIndex == n)) {
+                                currentMatIndex = n;
+                                materials[currentMatIndex].loadTextures();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
 
-        static glm::vec3 lightPos(2.0f, 2.0f, 2.0f);
-        static float lightIntensity = 1.0f;
-        static float lightColor[3] = {1.0f, 1.0f, 1.0f}; // Цвет света
-        if (lightMode == 1) {
-        ImGui::SliderFloat3("Light Position", &lightPos.x, -5.0f, 5.0f);
+                    if (ImGui::InputText("Material Name", nameBuffer, 128)) {
+                        materials[currentMatIndex].name = nameBuffer;
+                    }
+                    Material& mat = materials[currentMatIndex];
+                    ImGui::InputText("Diffuse", mat.diffusePath, 256);
+                    ImGui::InputText("Normal", mat.normalPath, 256);
+                    ImGui::InputText("Gloss", mat.glossPath, 256);
+                    ImGui::InputText("Luma", mat.lumaPath, 256);
+                    ImGui::InputText("Detail", mat.detailPath, 256);
+               }
+                ImGui::EndChild();
+
+                ImGui::SameLine();
+                // Центральная колонка: параметры материала + модель
+                ImGui::BeginChild("MatParamsChild", ImVec2(colWidth - 10, 170), true);
+                ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Parameters & Model");
+                if (!materials.empty() && currentMatIndex < materials.size()) {
+                    Material& mat = materials[currentMatIndex];
+                    ImGui::SliderFloat("Smoothness", &mat.smoothness, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Reflect", &mat.reflectScale, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Relief", &mat.reliefScale, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Refract", &mat.refractScale, 0.0f, 1.0f);
+                    ImGui::SliderFloat("Abberation", &mat.aberrationScale, 0.0f, 1.0f);
+
+                    std::vector<const char*> physMatPtrs;
+                    for (const auto& s : physicalMaterialTypes) physMatPtrs.push_back(s.c_str());
+
+                    if (ImGui::Combo("Phys Material", &mat.matTypeIndex, physMatPtrs.data(), static_cast<int>(physMatPtrs.size()))) {
+                        if (mat.matTypeIndex >= 0 && mat.matTypeIndex < physicalMaterialTypes.size()) {
+                            for(auto& p : mat.params) {
+                                if(p.first == "material") p.second = physicalMaterialTypes[mat.matTypeIndex];
+                            }
+                        }
+                    }
+                    if (ImGui::Button("Apply Changes")) {
+                        mat.syncParams();
+                        mat.loadTextures();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Save All")) {
+                        materials[currentMatIndex].syncParams();
+                        SaveAllMaterials(currentFileName, materials);
+                    }
+                }
+                ImGui::Separator();
+                ImGui::Combo("Model Shape", &shapeType, "Cube\0Sphere\0");
+                ImGui::EndChild();
+
+                ImGui::SameLine();
+                // Правая колонка: Освещение
+                ImGui::BeginChild("MatLightChild", ImVec2(colWidth - 10, 170), true);
+                ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Lighting & Maps");
+                ImGui::Checkbox("Normal Map", &useNormal);
+                ImGui::Checkbox("Gloss Map", &useGloss);
+                ImGui::Checkbox("Luma Map", &useLuma);
+
+                ImGui::Combo("Light Mode", &lightMode, "Camera\0Fixed\0");
+                ImGui::SliderFloat("Intensity", &lightIntensity, 0.0f, 5.0f);
+                ImGui::ColorEdit3("Color", lightColor);
+                ImGui::EndChild();
+
+                ImGui::EndTabItem();
+            }
+       
+            // Вкладка 2: Физические материалы (.def)
+            if (ImGui::BeginTabItem("Physical Materials (.def)")) {
+                float colWidth = (float)display_w / 2.0f - 15.0f;
+
+                ImGui::BeginChild("DefListChild", ImVec2(colWidth, 170), true);
+                ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Physical Material Entries (scripts/materials.def)");
+                
+                if (!physicalMaterials.empty()) {
+                    if (ImGui::BeginCombo("Select Physical Material", physicalMaterials[currentPhysMatIndex].name.c_str())) {
+                        for (int n = 0; n < physicalMaterials.size(); n++) {
+                            if (ImGui::Selectable(physicalMaterials[n].name.c_str(), currentPhysMatIndex == n)) {
+                                currentPhysMatIndex = n;
+                                physicalMaterials[currentPhysMatIndex].updateBuffers();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+
+                    static char defNameBuf[128];
+                    static int lastDefIndex = -1;
+                    if (lastDefIndex != currentPhysMatIndex) {
+                        strncpy(defNameBuf, physicalMaterials[currentPhysMatIndex].name.c_str(), sizeof(defNameBuf) - 1);
+                        lastDefIndex = currentPhysMatIndex;
+                    }
+                    if (ImGui::InputText("Material Name", defNameBuf, sizeof(defNameBuf))) {
+                        physicalMaterials[currentPhysMatIndex].name = defNameBuf;
+                    }
+
+                    if (ImGui::Button("Add New Def Entry")) {
+                        PhysicalMaterialEntry newEntry;
+                        newEntry.name = "new_material_type";
+                        newEntry.multiParams["impact_decal"] = {"shot"};
+                        newEntry.updateBuffers();
+                        physicalMaterials.push_back(newEntry);
+                        currentPhysMatIndex = static_cast<int>(physicalMaterials.size()) - 1;
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(1,0,0,1), "No physical materials loaded from materials.def!");
+                    if (ImGui::Button("Load / Create Default")) {
+                        fs::path defPath = gameRootPath / "scripts" / "materials.def";
+                        if (!fs::exists(defPath)) defPath = gameRootPath / "materials.def";
+                        LoadAllPhysicalMaterials(defPath.string(), physicalMaterials);
+                        if (physicalMaterials.empty()) {
+                            PhysicalMaterialEntry defMat;
+                            defMat.name = "default";
+                            defMat.multiParams["impact_decal"] = {"shot"};
+                            defMat.updateBuffers();
+                            physicalMaterials.push_back(defMat);
+                        }
+                        currentPhysMatIndex = 0;
+                        physicalMaterials[currentPhysMatIndex].updateBuffers();
+                    }
+                }
+                ImGui::EndChild();
+
+                ImGui::SameLine();
+
+                ImGui::BeginChild("DefParamsChild", ImVec2(colWidth, 170), true);
+                ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Parameters Editor");
+                if (!physicalMaterials.empty() && currentPhysMatIndex < physicalMaterials.size()) {
+                    PhysicalMaterialEntry& pMat = physicalMaterials[currentPhysMatIndex];
+                    
+                    ImGui::InputText("Impact Decal", pMat.impactDecal, sizeof(pMat.impactDecal));
+                    ImGui::InputText("Impact Parts", pMat.impactPartsBuf, sizeof(pMat.impactPartsBuf));
+                    ImGui::InputText("Impact Sound", pMat.impactSoundBuf, sizeof(pMat.impactSoundBuf));
+                    ImGui::InputText("Step Sound", pMat.stepSoundBuf, sizeof(pMat.stepSoundBuf));
+
+                    if (ImGui::Button("Apply Def Changes")) {
+                        pMat.syncParams();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Save materials.def")) {
+                        pMat.syncParams();
+                        fs::path defPath = gameRootPath / "scripts" / "materials.def";
+                        if (!fs::exists(defPath.parent_path())) fs::create_directories(defPath.parent_path());
+                        SaveAllPhysicalMaterials(defPath.string(), physicalMaterials);
+                        // Обновляем типы для .mat материалов
+                        physicalMaterialTypes = LoadPhysicalMaterialTypes();
+                    }
+                }
+                ImGui::EndChild();
+
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
         }
-        ImGui::SliderFloat("Light Intensity", &lightIntensity, 0.0f, 5.0f);
-        ImGui::ColorEdit3("Light Color", lightColor);
         ImGui::End();
         ImGui::Render();
 

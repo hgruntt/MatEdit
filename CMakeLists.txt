@@ -12,7 +12,6 @@ add_executable(MaterialEditor
     src/main.cpp
     src/cube_data.h
     src/sphere_data.h
-    resource.rc 
 )
 
 # Подключаем библиотеки
