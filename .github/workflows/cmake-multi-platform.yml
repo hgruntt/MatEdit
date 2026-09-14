@@ -55,7 +55,7 @@ jobs:
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
     - name: Install vcpkg dependencies
       run: |
-        vcpkg install glfw3:x64-windows glad:x64-windows imgui:x64-windows glm:x64-windows gli:x64-windows
+        vcpkg install
         vcpkg integrate install
         
     - name: Configure CMake
