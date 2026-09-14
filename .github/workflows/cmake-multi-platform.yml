@@ -46,14 +46,18 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-
+  
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
       id: strings
       shell: bash
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
-
+    - name: Install vcpkg dependencies
+      run: |
+        vcpkg install glfw3:x64-windows glad:x64-windows imgui:x64-windows glm:x64-windows gli:x64-windows
+        vcpkg integrate install
+        
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
@@ -63,10 +67,6 @@ jobs:
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -S ${{ github.workspace }}
-    - name: Install vcpkg dependencies
-      run: |
-        vcpkg install glfw3:x64-windows glad:x64-windows imgui:x64-windows glm:x64-windows gli:x64-windows
-        vcpkg integrate install
     
     - name: Build
       # Build your program with the given configuration. Note that --config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
