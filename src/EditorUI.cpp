@@ -87,7 +87,7 @@ void DrawEditorUI(
     GLuint& skyboxID,
     std::function<void(std::string&, int&)> refreshDataFunc
 ) {
-    // Панель снизу (Root Path)
+    // Панель сверху (Root Path)
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2((float)display_w, 85));
     ImGui::Begin("Game Root Directory:", nullptr,
