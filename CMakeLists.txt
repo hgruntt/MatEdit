@@ -9,6 +9,10 @@ find_package(imgui CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED) 
 find_package(gli CONFIG REQUIRED)
 add_executable(MaterialEditor
+    src/EditorUI.cpp
+    src/MaterialSystem.cpp
+    src/Config.cpp
+    src/Shader.cpp
     src/main.cpp
     src/cube_data.h
     src/sphere_data.h
