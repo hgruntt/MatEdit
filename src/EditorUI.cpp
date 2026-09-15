@@ -93,12 +93,21 @@ void DrawEditorUI(
     ImGui::SetNextWindowSize(ImVec2(static_cast<float>(display_w), 85.0f));
     ImGui::Begin("Game Root Directory:", nullptr,
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+
     static char gamePathBuffer[512];
-    strncpy(gamePathBuffer, gameRootPath.string().c_str(), sizeof(gamePathBuffer) - 1);
+    static bool initBuffer = true;
+    
+    if (initBuffer) {
+        strncpy(gamePathBuffer, gameRootPath.string().c_str(), sizeof(gamePathBuffer) - 1);
+        gamePathBuffer[sizeof(gamePathBuffer) - 1] = '\0';
+        initBuffer = false;
+    }
+
     ImGui::InputText("##GameDir", gamePathBuffer, sizeof(gamePathBuffer));
     if (ImGui::Button("Set & Refresh")) {
-        if (fs::exists(gamePathBuffer) && fs::is_directory(gamePathBuffer)) {
-            gameRootPath = gamePathBuffer;
+        fs::path newPath(gamePathBuffer);
+        if (fs::exists(newPath) && fs::is_directory(newPath)) {
+            gameRootPath = newPath;
             editorCfg.gamePath = gameRootPath.string();
             SaveConfig(editorCfg);
             refreshDataFunc(currentFileName, currentMatIndex);
