@@ -56,14 +56,22 @@ jobs:
       - name: Package
         run: |
           mkdir -p package
+
           cp build/MaterialEditor package/MaterialEditor
-          tar -czf MatEdit-linux-x64.tar.gz -C package MaterialEditor
+          cp src/shaders/basic.vert package/basic.vert
+          cp src/shaders/basic.frag package/basic.frag
+
+          tar -czf MatEdit-linux-x64-gcc.tar.gz \
+            -C package \
+            MaterialEditor \
+            basic.vert \
+            basic.frag
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MatEdit-linux-x64
-          path: MatEdit-linux-x64.tar.gz
+          name: MatEdit-linux-x64-gcc
+          path: MatEdit-linux-x64-gcc.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -105,6 +113,28 @@ jobs:
             --config Release \
             --parallel
 
+      - name: Package
+        run: |
+          mkdir -p package
+
+          cp build/MaterialEditor package/MaterialEditor
+          cp src/shaders/basic.vert package/basic.vert
+          cp src/shaders/basic.frag package/basic.frag
+
+          tar -czf MatEdit-linux-x64-clang.tar.gz \
+            -C package \
+            MaterialEditor \
+            basic.vert \
+            basic.frag
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MatEdit-linux-x64-clang
+          path: MatEdit-linux-x64-clang.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   build-windows:
     name: Build Windows x64 MSVC
     runs-on: windows-latest
@@ -140,16 +170,27 @@ jobs:
             build\Release\MaterialEditor.exe `
             package\MaterialEditor.exe
 
+          Copy-Item `
+            src\shaders\basic.vert `
+            package\basic.vert
+
+          Copy-Item `
+            src\shaders\basic.frag `
+            package\basic.frag
+
           Compress-Archive `
-            -Path package\MaterialEditor.exe `
-            -DestinationPath MatEdit-windows-x64.zip `
+            -Path `
+              package\MaterialEditor.exe, `
+              package\basic.vert, `
+              package\basic.frag `
+            -DestinationPath MatEdit-windows-x64-msvc.zip `
             -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MatEdit-windows-x64
-          path: MatEdit-windows-x64.zip
+          name: MatEdit-windows-x64-msvc
+          path: MatEdit-windows-x64-msvc.zip
           if-no-files-found: error
           retention-days: 1
 
@@ -169,16 +210,22 @@ jobs:
           submodules: false
           fetch-depth: 0
 
-      - name: Download Linux package
+      - name: Download Linux GCC package
         uses: actions/download-artifact@v4
         with:
-          name: MatEdit-linux-x64
+          name: MatEdit-linux-x64-gcc
           path: release
 
-      - name: Download Windows package
+      - name: Download Linux Clang package
         uses: actions/download-artifact@v4
         with:
-          name: MatEdit-windows-x64
+          name: MatEdit-linux-x64-clang
+          path: release
+
+      - name: Download Windows MSVC package
+        uses: actions/download-artifact@v4
+        with:
+          name: MatEdit-windows-x64-msvc
           path: release
 
       - name: Delete previous nightly release
@@ -187,7 +234,7 @@ jobs:
         run: |
           gh release delete nightly --yes --cleanup-tag || true
 
-      - name: Remove all tags
+      - name: Remove all tags except nightly
         run: |
           set -e
 
@@ -205,8 +252,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create nightly \
-            release/MatEdit-linux-x64.tar.gz \
-            release/MatEdit-windows-x64.zip \
+            release/MatEdit-linux-x64-gcc.tar.gz \
+            release/MatEdit-linux-x64-clang.tar.gz \
+            release/MatEdit-windows-x64-msvc.zip \
             --target "${GITHUB_SHA}" \
             --title "MatEdit Nightly" \
             --prerelease
