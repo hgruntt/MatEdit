@@ -31,7 +31,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            clang \
             libgl1-mesa-dev \
             libx11-dev \
             libxrandr-dev \
@@ -164,6 +163,12 @@ jobs:
       - build-windows
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
       - name: Download Linux package
         uses: actions/download-artifact@v4
         with:
@@ -183,8 +188,6 @@ jobs:
           gh release delete nightly --yes --cleanup-tag || true
 
       - name: Remove all tags
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
 
