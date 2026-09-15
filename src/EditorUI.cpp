@@ -90,7 +90,7 @@ void DrawEditorUI(
 ) {
     // Панель сверху (Root Path)
     ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2((float)display_w, 85));
+    ImGui::SetNextWindowSize(ImVec2(static_cast<float>(display_w), 85.0f));
     ImGui::Begin("Game Root Directory:", nullptr,
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
     static char gamePathBuffer[512];
@@ -184,8 +184,8 @@ void DrawEditorUI(
 
     ImGui::End();
 
-    ImGui::SetNextWindowPos(ImVec2(0, display_h - 220));
-    ImGui::SetNextWindowSize(ImVec2((float)display_w, 220));
+    ImGui::SetNextWindowPos(ImVec2(0, display_h - 220.0f));
+    ImGui::SetNextWindowSize(ImVec2(static_cast<float>(display_w), 220.0f));
     ImGui::Begin("Editor Panels", nullptr,
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
 
@@ -193,14 +193,14 @@ void DrawEditorUI(
             
             // Вкладка 1: Визуальные материалы (.mat)
             if (ImGui::BeginTabItem("Visual Materials (.mat)")) {
-                float colWidth = (float)display_w / 3.0f;
+                float colWidth = static_cast<float>(display_w) / 3.0f;
                 
                 // Левая колончатость внутри вкладки
-                ImGui::BeginChild("MatFilesChild", ImVec2(colWidth - 10, 170), true);
+                ImGui::BeginChild("MatFilesChild", ImVec2(colWidth - 10.0f, 170.0f), true);
                 ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Material Files");
                 if (!matFiles.empty()) {
                     if (ImGui::BeginCombo("Select .mat File", currentFileName.c_str())) {
-                        for (int n = 0; n < matFiles.size(); n++) {
+                        for (size_t n = 0; n < matFiles.size(); n++) {
                             if (ImGui::Selectable(matFiles[n].c_str(), currentFileName == matFiles[n])) {
                                 currentFileName = matFiles[n];
                                 editorCfg.lastMatFile = currentFileName;
@@ -231,7 +231,7 @@ void DrawEditorUI(
                         SaveAllMaterials(currentFileName, materials);
                     }
                 }
-                if (!materials.empty() && currentMatIndex < materials.size()) {
+                if (!materials.empty() && static_cast<size_t>(currentMatIndex) < materials.size()) {
                     static char nameBuffer[128];
                     static int lastMatIndex = -1;
                     if (lastMatIndex != currentMatIndex) {
@@ -239,9 +239,9 @@ void DrawEditorUI(
                         lastMatIndex = currentMatIndex;
                     }
                     if (ImGui::BeginCombo("Select Material", materials[currentMatIndex].name.c_str())) {
-                        for (int n = 0; n < materials.size(); n++) {
-                            if (ImGui::Selectable(materials[n].name.c_str(), currentMatIndex == n)) {
-                                currentMatIndex = n;
+                        for (size_t n = 0; n < materials.size(); n++) {
+                            if (ImGui::Selectable(materials[n].name.c_str(), currentMatIndex == static_cast<int>(n))) {
+                                currentMatIndex = static_cast<int>(n);
                                 materials[currentMatIndex].loadTextures();
                             }
                         }
@@ -263,9 +263,9 @@ void DrawEditorUI(
 
                 ImGui::SameLine();
                 // Центральная колонка: параметры материала + модель
-                ImGui::BeginChild("MatParamsChild", ImVec2(colWidth - 10, 170), true);
+                ImGui::BeginChild("MatParamsChild", ImVec2(colWidth - 10.0f, 170.0f), true);
                 ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Parameters & Model");
-                if (!materials.empty() && currentMatIndex < materials.size()) {
+                if (!materials.empty() && static_cast<size_t>(currentMatIndex) < materials.size()) {
                     Material& mat = materials[currentMatIndex];
                     ImGui::SliderFloat("Smoothness", &mat.smoothness, 0.0f, 1.0f);
                     ImGui::SliderFloat("Reflect", &mat.reflectScale, 0.0f, 1.0f);
@@ -277,7 +277,7 @@ void DrawEditorUI(
                     for (const auto& s : physicalMaterialTypes) physMatPtrs.push_back(s.c_str());
 
                     if (ImGui::Combo("Phys Material", &mat.matTypeIndex, physMatPtrs.data(), static_cast<int>(physMatPtrs.size()))) {
-                        if (mat.matTypeIndex >= 0 && mat.matTypeIndex < physicalMaterialTypes.size()) {
+                        if (mat.matTypeIndex >= 0 && static_cast<size_t>(mat.matTypeIndex) < physicalMaterialTypes.size()) {
                             for(auto& p : mat.params) {
                                 if(p.first == "material") p.second = physicalMaterialTypes[mat.matTypeIndex];
                             }
@@ -299,7 +299,7 @@ void DrawEditorUI(
 
                 ImGui::SameLine();
                 // Правая колонка: Освещение
-                ImGui::BeginChild("MatLightChild", ImVec2(colWidth - 10, 170), true);
+                ImGui::BeginChild("MatLightChild", ImVec2(colWidth - 10.0f, 170.0f), true);
                 ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Lighting & Maps");
                 ImGui::Checkbox("Normal Map", &useNormal);
                 ImGui::Checkbox("Gloss Map", &useGloss);
@@ -316,16 +316,16 @@ void DrawEditorUI(
        
             // Вкладка 2: Физические материалы (.def)
             if (ImGui::BeginTabItem("Physical Materials (.def)")) {
-                float colWidth = (float)display_w / 2.0f - 15.0f;
+                float colWidth = static_cast<float>(display_w) / 2.0f - 15.0f;
 
-                ImGui::BeginChild("DefListChild", ImVec2(colWidth, 170), true);
+                ImGui::BeginChild("DefListChild", ImVec2(colWidth, 170.0f), true);
                 ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Physical Material Entries (scripts/materials.def)");
                 
                 if (!physicalMaterials.empty()) {
                     if (ImGui::BeginCombo("Select Physical Material", physicalMaterials[currentPhysMatIndex].name.c_str())) {
-                        for (int n = 0; n < physicalMaterials.size(); n++) {
-                            if (ImGui::Selectable(physicalMaterials[n].name.c_str(), currentPhysMatIndex == n)) {
-                                currentPhysMatIndex = n;
+                        for (size_t n = 0; n < physicalMaterials.size(); n++) {
+                            if (ImGui::Selectable(physicalMaterials[n].name.c_str(), currentPhysMatIndex == static_cast<int>(n))) {
+                                currentPhysMatIndex = static_cast<int>(n);
                                 physicalMaterials[currentPhysMatIndex].updateBuffers();
                             }
                         }
@@ -371,9 +371,9 @@ void DrawEditorUI(
 
                 ImGui::SameLine();
 
-                ImGui::BeginChild("DefParamsChild", ImVec2(colWidth, 170), true);
+                ImGui::BeginChild("DefParamsChild", ImVec2(colWidth, 170.0f), true);
                 ImGui::TextColored(ImVec4(0.35f, 0.65f, 1.00f, 1.00f), "Parameters Editor");
-                if (!physicalMaterials.empty() && currentPhysMatIndex < physicalMaterials.size()) {
+                if (!physicalMaterials.empty() && static_cast<size_t>(currentPhysMatIndex) < physicalMaterials.size()) {
                     PhysicalMaterialEntry& pMat = physicalMaterials[currentPhysMatIndex];
                     
                     ImGui::InputText("Impact Decal", pMat.impactDecal, sizeof(pMat.impactDecal));

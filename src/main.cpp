@@ -249,8 +249,8 @@ int main() {
         glUniform1f(glGetUniformLocation(shader, "metallic"), metallic);
         glUniform1f(glGetUniformLocation(shader, "roughness"), roughness);
 
-        if (!materials.empty() && currentMatIndex >= 0 && currentMatIndex < materials.size()) {
-            glUniform1f(glGetUniformLocation(shader, "reflectScale"), materials[currentMatIndex].reflectScale);
+       if (!materials.empty() && currentMatIndex >= 0 && static_cast<size_t>(currentMatIndex) < materials.size()) {
+             glUniform1f(glGetUniformLocation(shader, "reflectScale"), materials[currentMatIndex].reflectScale);
             glUniform1f(glGetUniformLocation(shader, "smoothness"), materials[currentMatIndex].smoothness);
         } else {
             glUniform1f(glGetUniformLocation(shader, "reflectScale"), 0.3f);
@@ -322,7 +322,7 @@ int main() {
         glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
         } else {
             glBindVertexArray(VAO_sphere);
-            glDrawElements(GL_TRIANGLES, (GLsizei)sphere.indices.size(), GL_UNSIGNED_INT, 0);
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sphere.indices.size()), GL_UNSIGNED_INT, 0);
     }
 
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
