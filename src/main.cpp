@@ -6,6 +6,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <thread>
 #include <chrono>
+#include <algorithm>
 
 #include "Config.h"
 #include "MaterialSystem.h"
@@ -24,7 +25,7 @@ int main() {
    
     EditorConfig editorCfg;
     LoadConfig(editorCfg);
-    gameRootPath = editorCfg.gamePath.empty() ? fs::current_path() : editorCfg.gamePath;
+    gameRootPath = editorCfg.gamePath.empty() ? fs::current_path() : fs::path(editorCfg.gamePath);
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -65,7 +66,7 @@ int main() {
         
         if (!matFiles.empty()) {
             // Пытаемся найти последний открытый файл из конфига
-            auto it = std::find(matFiles.begin(), matFiles.end(), editorCfg.lastMatFile);
+            auto it = std::find(matFiles.begin(), matFiles.end(), std::string(editorCfg.lastMatFile));
             if (it != matFiles.end()) {
                 currFile = *it;
             } else {
