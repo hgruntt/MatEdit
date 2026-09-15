@@ -69,5 +69,5 @@
 - `src/EditorUI.cpp / .h` — Интерфейс пользователя на базе Dear ImGui.
 - `src/Shader.cpp / .h` — Загрузка и компиляция OpenGL шейдеров.
 - `src/Config.cpp / .h` — Чтение и запись конфигурации редактора (`editor_config.txt`).
-- `src/shaders/basic.vert / basic.frag` — Вершинный и пиксельный шейдеры (включая расчет света, нормалей, бликов, luma и Parallax/Bump mapping).
+- `src/shaders/basic.vert / basic.frag` — Вершинный и пиксельный шейдеры (включая расчет света, нормалей, бликов, luma и Parallax mapping).
 - `src/cube_data.h` & `src/sphere_data.h` — Вершинные буферы примитивов.
