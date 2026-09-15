@@ -1,4 +1,5 @@
 #include "Shader.h"
+#include "ShadersSource.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -26,6 +27,50 @@ std::filesystem::path ResolveShaderPath(const char* path) {
 
     return input;
 }
+}
+
+GLuint CompileShaderFromMemory(GLenum type, const std::string& source) {
+    GLuint shader = glCreateShader(type);
+    const char* src = source.c_str();
+    glShaderSource(shader, 1, &src, NULL);
+    glCompileShader(shader);
+    
+    // Проверка ошибок компиляции (опционально, но полезно)
+    int success;
+    char infoLog[512];
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(shader, 512, NULL, infoLog);
+        std::cerr << "ERROR::SHADER::COMPILATION_FAILED\n" << infoLog << std::endl;
+    }
+    return shader;
+}
+
+GLuint LoadShaderFromMemory() {
+
+    GLint success = GL_FALSE;
+    char infoLog[2048] = {};
+
+    GLuint vertexShader = CompileShaderFromMemory(GL_VERTEX_SHADER, vertexShaderSource);
+    GLuint fragmentShader = CompileShaderFromMemory(GL_FRAGMENT_SHADER, fragmentShaderSource);
+
+    GLuint shaderProgram = glCreateProgram();
+    glAttachShader(shaderProgram, vertexShader);
+    glAttachShader(shaderProgram, fragmentShader);
+    glLinkProgram(shaderProgram);
+
+    glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+    if (!success) {
+        glGetProgramInfoLog(shaderProgram, sizeof(infoLog), nullptr, infoLog);
+        std::cerr << "ERROR: Shader program linking failed:\n" << infoLog << std::endl;
+        glDeleteProgram(shaderProgram);
+        shaderProgram = 0;
+    }
+    
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    return shaderProgram;
 }
 
 GLuint LoadShader(const char* vertexPath, const char* fragmentPath) {

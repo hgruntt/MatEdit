@@ -343,7 +343,7 @@ int main() {
 
     refreshData(currentFileName, currentMatIndex);
 
-    GLuint shader = LoadShader("basic.vert", "basic.frag");
+    GLuint shader = LoadShaderFromMemory();
     if (shader == 0) {
         glfwDestroyWindow(window);
         glfwTerminate();
