@@ -58,14 +58,10 @@ jobs:
           mkdir -p package
 
           cp build/MaterialEditor package/MaterialEditor
-          cp src/shaders/basic.vert package/basic.vert
-          cp src/shaders/basic.frag package/basic.frag
 
           tar -czf MatEdit-linux-x64-gcc.tar.gz \
             -C package \
-            MaterialEditor \
-            basic.vert \
-            basic.frag
+            MaterialEditor
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -118,14 +114,10 @@ jobs:
           mkdir -p package
 
           cp build/MaterialEditor package/MaterialEditor
-          cp src/shaders/basic.vert package/basic.vert
-          cp src/shaders/basic.frag package/basic.frag
 
           tar -czf MatEdit-linux-x64-clang.tar.gz \
             -C package \
-            MaterialEditor \
-            basic.vert \
-            basic.frag
+            MaterialEditor 
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -170,19 +162,11 @@ jobs:
             build\Release\MaterialEditor.exe `
             package\MaterialEditor.exe
 
-          Copy-Item `
-            src\shaders\basic.vert `
-            package\basic.vert
 
-          Copy-Item `
-            src\shaders\basic.frag `
-            package\basic.frag
 
           Compress-Archive `
             -Path `
-              package\MaterialEditor.exe, `
-              package\basic.vert, `
-              package\basic.frag `
+              package\MaterialEditor.exe `
             -DestinationPath MatEdit-windows-x64-msvc.zip `
             -Force
 
