@@ -10,6 +10,7 @@ struct EditorConfig {
     bool useNormal = true;
     bool useGloss = true;
     bool useLuma = true;
+    bool useBump = true;
 };
 
 void LoadConfig(EditorConfig& cfg);

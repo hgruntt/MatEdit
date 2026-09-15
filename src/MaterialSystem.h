@@ -33,6 +33,7 @@ struct Material {
     void updateBuffers();
     void syncParams();
     void loadTextures();
+    void releaseTextures();
 };
 
 struct PhysicalMaterialEntry {

@@ -8,7 +8,6 @@ void SetupModernDarkStyle() {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* colors = style.Colors;
 
-    // Закругления
     style.WindowRounding = 6.0f;
     style.ChildRounding = 4.0f;
     style.FrameRounding = 4.0f;
@@ -156,7 +155,6 @@ void DrawEditorUI(
         if (ImGui::BeginPopupModal("New .def", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
             static char newDefFileName[128] = "materials.def";
 
-            // Проверяем существование файла заранее
             std::string fileNameStr = std::string(newDefFileName);
             if (fileNameStr.find(".def") == std::string::npos) fileNameStr += ".def";
 
@@ -200,7 +198,6 @@ void DrawEditorUI(
 
          if (ImGui::BeginTabBar("EditorTabs", ImGuiTabBarFlags_None)) {
             
-            // Вкладка 1: Визуальные материалы (.mat)
             if (ImGui::BeginTabItem("Visual Materials (.mat)")) {
                 float colWidth = static_cast<float>(display_w) / 3.0f;
                 
@@ -303,7 +300,7 @@ void DrawEditorUI(
                     }
                 }
                 ImGui::Separator();
-                ImGui::Combo("Model Shape", &shapeType, "Cube\0Sphere\0");
+                ImGui::Combo("Model Shape", &shapeType, "Cube\0Sphere\0Plane\0Cylinder\0Cone\0Torus\0Newell Teapot\0");
                 ImGui::EndChild();
 
                 ImGui::SameLine();
@@ -323,7 +320,6 @@ void DrawEditorUI(
                 ImGui::EndTabItem();
             }
        
-            // Вкладка 2: Физические материалы (.def)
             if (ImGui::BeginTabItem("Physical Materials (.def)")) {
                 float colWidth = static_cast<float>(display_w) / 2.0f - 15.0f;
 
@@ -399,7 +395,6 @@ void DrawEditorUI(
                         fs::path defPath = gameRootPath / "scripts" / "materials.def";
                         if (!fs::exists(defPath.parent_path())) fs::create_directories(defPath.parent_path());
                         SaveAllPhysicalMaterials(defPath.string(), physicalMaterials);
-                        // Обновляем типы для .mat материалов
                         physicalMaterialTypes = LoadPhysicalMaterialTypes();
                     }
                 }

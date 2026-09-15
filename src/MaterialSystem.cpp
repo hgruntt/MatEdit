@@ -40,157 +40,219 @@ std::vector<std::string> LoadPhysicalMaterialTypes() {
     return types;
 }
 
-GLuint LoadDDSTexture(const std::string& path) {
-    fs::path fullPath;
-    if (fs::path(path).is_absolute()) {
-        fullPath = fs::path(path);
-    } else {
-        fullPath = gameRootPath / path;
+namespace {
+void CopyString(char* destination, std::size_t capacity, const std::string& value) {
+    if (capacity == 0) return;
+    std::strncpy(destination, value.c_str(), capacity - 1);
+    destination[capacity - 1] = '\0';
+}
+
+GLuint UploadDDS2D(const gli::texture& texture, const std::string& sourcePath) {
+    if (texture.empty() || texture.levels() == 0) return 0;
+
+    gli::gl GL(gli::gl::PROFILE_GL33);
+    const gli::gl::format Format = GL.translate(texture.format(), texture.swizzles());
+    if (Format.Internal == GL_NONE) {
+        std::cerr << "Unsupported DDS format: " << sourcePath << std::endl;
+        return 0;
     }
 
+    GLuint textureID = 0;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(texture.levels() - 1));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, texture.levels() > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    const bool compressed = Format.External == GL_NONE || Format.Type == GL_NONE;
+    for (std::size_t level = 0; level < texture.levels(); ++level) {
+        const GLsizei width = static_cast<GLsizei>(texture.extent(level).x);
+        const GLsizei height = static_cast<GLsizei>(texture.extent(level).y);
+        const GLsizei size = static_cast<GLsizei>(texture.size(level));
+
+        if (compressed) {
+            glCompressedTexImage2D(GL_TEXTURE_2D,
+                                   static_cast<GLint>(level),
+                                   Format.Internal,
+                                   width,
+                                   height,
+                                   0,
+                                   size,
+                                   texture.data(0, 0, level));
+        } else {
+            glTexImage2D(GL_TEXTURE_2D,
+                         static_cast<GLint>(level),
+                         Format.Internal,
+                         width,
+                         height,
+                         0,
+                         Format.External,
+                         Format.Type,
+                         texture.data(0, 0, level));
+        }
+    }
+
+    if (glGetError() != GL_NO_ERROR) {
+        glDeleteTextures(1, &textureID);
+        std::cerr << "Failed to upload DDS texture: " << sourcePath << std::endl;
+        return 0;
+    }
+
+    return textureID;
+}
+}
+
+GLuint LoadDDSTexture(const std::string& path) {
+    fs::path fullPath = fs::path(path).is_absolute() ? fs::path(path) : (gameRootPath / path);
     std::string ddsFilePath = fullPath.string() + ".dds";
     gli::texture texture = gli::load(ddsFilePath);
     if (texture.empty()) {
         std::cerr << "Failed to load DDS: " << ddsFilePath << std::endl;
         return 0;
     }
-    gli::gl GL(gli::gl::PROFILE_GL33);
-
-    GLuint textureID;
-    glGenTextures(1, &textureID);
-    glBindTexture(GL_TEXTURE_2D, textureID);
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(texture.levels() - 1));
-
-    for (std::size_t level = 0; level < texture.levels(); ++level) {
-        glCompressedTexImage2D(GL_TEXTURE_2D,
-                               static_cast<GLint>(level),
-                               GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM,
-                               static_cast<GLsizei>(texture.extent(level).x),
-                               static_cast<GLsizei>(texture.extent(level).y),
-                               0,
-                               static_cast<GLsizei>(texture.size(level)),
-                               texture.data(0, 0, level));
-    }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    return textureID;
+    return UploadDDS2D(texture, ddsFilePath);
 }
 
 GLuint LoadDDS_Cubemap(const std::string& path) {
     gli::texture texture = gli::load(path + ".dds");
     if (texture.empty()) return 0;
 
-    GLuint textureID;
-    glGenTextures(1, &textureID);
-    glBindTexture(GL_TEXTURE_2D, textureID);
-
     gli::gl GL(gli::gl::PROFILE_GL33);
+    const gli::gl::format Format = GL.translate(texture.format(), texture.swizzles());
+    if (Format.Internal == GL_NONE || texture.faces() != 6) return 0;
 
-    for (std::size_t face = 0; face < 6; ++face) {
-        for (std::size_t level = 0; level < texture.levels(); ++level) {
-            glCompressedTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face,
-                                   static_cast<GLint>(level),
-                                   GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM,
-                                   static_cast<GLsizei>(texture.extent(level).x),
-                                   static_cast<GLsizei>(texture.extent(level).y),
-                                   0,
-                                   static_cast<GLsizei>(texture.size(level)),
-                                   texture.data(face, 0, level));
-        }
-    }
-
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    GLuint textureID = 0;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, textureID);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(texture.levels() - 1));
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, texture.levels() > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    
+
+    const bool compressed = Format.External == GL_NONE || Format.Type == GL_NONE;
+    for (std::size_t face = 0; face < 6; ++face) {
+        for (std::size_t level = 0; level < texture.levels(); ++level) {
+            const GLsizei width = static_cast<GLsizei>(texture.extent(level).x);
+            const GLsizei height = static_cast<GLsizei>(texture.extent(level).y);
+            const GLsizei size = static_cast<GLsizei>(texture.size(level));
+            const GLenum target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + static_cast<GLenum>(face);
+
+            if (compressed) {
+                glCompressedTexImage2D(target,
+                                       static_cast<GLint>(level),
+                                       Format.Internal,
+                                       width,
+                                       height,
+                                       0,
+                                       size,
+                                       texture.data(face, 0, level));
+            } else {
+                glTexImage2D(target,
+                             static_cast<GLint>(level),
+                             Format.Internal,
+                             width,
+                             height,
+                             0,
+                             Format.External,
+                             Format.Type,
+                             texture.data(face, 0, level));
+            }
+        }
+    }
+
+    if (glGetError() != GL_NO_ERROR) {
+        glDeleteTextures(1, &textureID);
+        return 0;
+    }
     return textureID;
 }
 
 GLuint LoadSkyboxAs2D(const std::string& path) {
     fs::path fullPath = fs::path(path).is_absolute() ? fs::path(path) : (gameRootPath / path);
     std::string ddsFilePath = fullPath.string() + ".dds";
-
     gli::texture texture = gli::load(ddsFilePath);
     if (texture.empty()) {
         std::cerr << "Failed to load Skybox DDS: " << ddsFilePath << std::endl;
         return 0;
     }
-
-    GLuint textureID;
-    glGenTextures(1, &textureID);
-    glBindTexture(GL_TEXTURE_2D, textureID);
-
-    for (std::size_t level = 0; level < texture.levels(); ++level) {
-        glCompressedTexImage2D(GL_TEXTURE_2D,
-                               static_cast<GLint>(level),
-                               GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM,
-                               static_cast<GLsizei>(texture.extent(level).x),
-                               static_cast<GLsizei>(texture.extent(level).y),
-                               0,
-                               static_cast<GLsizei>(texture.size(level)),
-                               texture.data(0, 0, level));
-    }
-
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    return textureID;
+    return UploadDDS2D(texture, ddsFilePath);
 }
 
 void Material::updateBuffers() {
-    for(auto& p : params) {
-        if(p.first == "diffuseMap") strncpy(diffusePath, p.second.c_str(), 255);
-        if(p.first == "normalMap") strncpy(normalPath, p.second.c_str(), 255);
-        if(p.first == "glossMap") strncpy(glossPath, p.second.c_str(), 255);
-        if(p.first == "LumaMap") strncpy(lumaPath, p.second.c_str(), 255);
-        if(p.first == "bumpMap" || p.first == "bump") strncpy(bumpPath, p.second.c_str(), 255);
-        if(p.first == "detailmap") strncpy(detailPath, p.second.c_str(), 255);
-        if(p.first == "detailScale") strncpy(detailScale, p.second.c_str(), 63);
-        if(p.first == "smoothness") try { smoothness = std::stof(p.second); } catch(...) {}
-        if(p.first == "reflectScale") try { reflectScale = std::stof(p.second); } catch(...) {}
-        if(p.first == "refractScale") try { refractScale = std::stof(p.second); } catch(...) {}
-        if(p.first == "aberrationScale") try { aberrationScale = std::stof(p.second); } catch(...) {}
-        if(p.first == "reliefScale") try { reliefScale = std::stof(p.second); } catch(...) {}
-        if(p.first == "swayHeight") try { swayHeight = std::stoi(p.second); } catch(...) {}
-        if(p.first == "material") {
-            matTypeIndex = 0;
-            for(size_t i = 0; i < physicalMaterialTypes.size(); i++) {
-                if(p.second == physicalMaterialTypes[i]) {
+    diffusePath[0] = '\0';
+    normalPath[0] = '\0';
+    glossPath[0] = '\0';
+    lumaPath[0] = '\0';
+    bumpPath[0] = '\0';
+    detailPath[0] = '\0';
+    CopyString(detailScale, sizeof(detailScale), "1 1");
+    smoothness = 0.0f;
+    reflectScale = 0.0f;
+    refractScale = 0.0f;
+    aberrationScale = 0.0f;
+    reliefScale = 0.0f;
+    swayHeight = 0;
+    matTypeIndex = 0;
+
+    for (const auto& p : params) {
+        if (p.first == "diffuseMap") CopyString(diffusePath, sizeof(diffusePath), p.second);
+        if (p.first == "normalMap") CopyString(normalPath, sizeof(normalPath), p.second);
+        if (p.first == "glossMap") CopyString(glossPath, sizeof(glossPath), p.second);
+        if (p.first == "LumaMap") CopyString(lumaPath, sizeof(lumaPath), p.second);
+        if (p.first == "bumpMap" || p.first == "bump") CopyString(bumpPath, sizeof(bumpPath), p.second);
+        if (p.first == "detailmap") CopyString(detailPath, sizeof(detailPath), p.second);
+        if (p.first == "detailScale") CopyString(detailScale, sizeof(detailScale), p.second);
+        if (p.first == "smoothness") try { smoothness = std::stof(p.second); } catch(...) {}
+        if (p.first == "reflectScale") try { reflectScale = std::stof(p.second); } catch(...) {}
+        if (p.first == "refractScale") try { refractScale = std::stof(p.second); } catch(...) {}
+        if (p.first == "aberrationScale") try { aberrationScale = std::stof(p.second); } catch(...) {}
+        if (p.first == "reliefScale") try { reliefScale = std::stof(p.second); } catch(...) {}
+        if (p.first == "swayHeight") try { swayHeight = std::stoi(p.second); } catch(...) {}
+        if (p.first == "material") {
+            for (std::size_t i = 0; i < physicalMaterialTypes.size(); ++i) {
+                if (p.second == physicalMaterialTypes[i]) {
                     matTypeIndex = static_cast<int>(i);
                     break;
                 }
             }
-        }   
+        }
     }
 }
 
 void Material::syncParams() {
     auto setParam = [&](const std::string& key, const std::string& val) {
-        bool found = false;
-        for(auto& p : params) {
-            if(p.first == key) {
+        for (auto& p : params) {
+            if (p.first == key) {
                 p.second = val;
-                found = true;
-                break;
+                return;
             }
         }
-        if(!found) {
-            params.push_back({key, val});
+        params.push_back({key, val});
+    };
+
+    auto setOptionalParam = [&](const std::string& key, const char* value) {
+        if (value[0] != '\0') {
+            setParam(key, value);
+        } else {
+            params.erase(std::remove_if(params.begin(), params.end(), [&](const auto& p) {
+                return p.first == key;
+            }), params.end());
         }
     };
 
-    setParam("diffuseMap", diffusePath);
-    if(strlen(normalPath) > 0) setParam("normalMap", normalPath);
-    if(strlen(glossPath) > 0) setParam("glossMap", glossPath);
-    if(strlen(lumaPath) > 0) setParam("LumaMap", lumaPath);
-    if(strlen(bumpPath) > 0) setParam("bumpMap", bumpPath);
-    if(strlen(detailPath) > 0) setParam("detailmap", detailPath);
+    setOptionalParam("diffuseMap", diffusePath);
+    setOptionalParam("normalMap", normalPath);
+    setOptionalParam("glossMap", glossPath);
+    setOptionalParam("LumaMap", lumaPath);
+    setOptionalParam("bumpMap", bumpPath);
+    setOptionalParam("detailmap", detailPath);
     setParam("detailScale", detailScale);
     setParam("smoothness", std::to_string(smoothness));
     setParam("reflectScale", std::to_string(reflectScale));
@@ -204,9 +266,15 @@ void Material::syncParams() {
     }
 }
 
-void Material::loadTextures() {
-    for(auto const& [key, id] : textures) glDeleteTextures(1, &id);
+void Material::releaseTextures() {
+    for (const auto& [key, id] : textures) {
+        if (id != 0) glDeleteTextures(1, &id);
+    }
     textures.clear();
+}
+
+void Material::loadTextures() {
+    releaseTextures();
     for(auto& p : params) {
         if(p.first == "diffuseMap") textures["diffuse"] = LoadDDSTexture(p.second);
         if(p.first == "normalMap") textures["normal"] = LoadDDSTexture(p.second);
@@ -233,10 +301,10 @@ void PhysicalMaterialEntry::updateBuffers() {
 
     for (auto& [key, vals] : multiParams) {
         std::string joined = joinVec(vals);
-        if (key == "impact_decal") strncpy(impactDecal, vals.empty() ? "" : vals[0].c_str(), sizeof(impactDecal) - 1);
-        if (key == "impact_parts") strncpy(impactPartsBuf, joined.c_str(), sizeof(impactPartsBuf) - 1);
-        if (key == "impact_sound") strncpy(impactSoundBuf, joined.c_str(), sizeof(impactSoundBuf) - 1);
-        if (key == "step_sound") strncpy(stepSoundBuf, joined.c_str(), sizeof(stepSoundBuf) - 1);
+        if (key == "impact_decal") CopyString(impactDecal, sizeof(impactDecal), vals.empty() ? "" : vals[0]);
+        if (key == "impact_parts") CopyString(impactPartsBuf, sizeof(impactPartsBuf), joined);
+        if (key == "impact_sound") CopyString(impactSoundBuf, sizeof(impactSoundBuf), joined);
+        if (key == "step_sound") CopyString(stepSoundBuf, sizeof(stepSoundBuf), joined);
     }
 }
 
@@ -378,6 +446,7 @@ void LoadAllMaterials(const std::string& path, std::vector<Material>& materials)
 void SaveAllMaterials(const std::string& path, const std::vector<Material>& materials) {
     fs::path fullPath = fs::path(path).is_absolute() ? fs::path(path) : (gameRootPath / path);
     std::ofstream file(fullPath);
+    if (!file.is_open()) return;
     for (const auto& mat : materials) {
         file << "\"" << mat.name << "\"\n{\n";
         for (const auto& p : mat.params) {
