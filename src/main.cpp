@@ -4,13 +4,18 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <thread>
+#include <chrono>
+
 #include "Config.h"
 #include "MaterialSystem.h"
 #include "Shader.h"
 #include "EditorUI.h"
+
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+
 #include "cube_data.h"
 #include "sphere_data.h"
 
@@ -39,7 +44,7 @@ int main() {
     std::string currentDefFile = "scripts/materials.def";
     int currentPhysMatIndex = 0;
     int shapeType = 0; int lightMode = 0;
-    bool useNormal = true; bool useGloss = true; bool useLuma = true;
+    bool useNormal = true; bool useGloss = true; bool useLuma = true; bool useBump = true;
     float lightIntensity = 1.0f;
     float lightColor[3] = {1.0f, 1.0f, 1.0f};
 
@@ -128,6 +133,8 @@ int main() {
     glUniform1i(glGetUniformLocation(shader, "diffuseMap"), 0);
     glUniform1i(glGetUniformLocation(shader, "normalMap"), 1);
     glUniform1i(glGetUniformLocation(shader, "glossMap"), 2);
+    glUniform1i(glGetUniformLocation(shader, "lumaMap"), 3);
+    glUniform1i(glGetUniformLocation(shader, "bumpMap"), 5); // Слот для Bump карты
 
   IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -135,8 +142,23 @@ int main() {
     ImGui_ImplOpenGL3_Init("#version 330");
     SetupModernDarkStyle();
 
+    // Переменные для ограничения FPS (60 FPS)
+    const double targetFPS = 60.0;
+    const double targetFrameTime = 1.0 / targetFPS;
+    double lastFrameTime = glfwGetTime();
+
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // Ограничение FPS: вычисляем время кадра и при необходимости ждем
+        double currentTime = glfwGetTime();
+        double elapsedTime = currentTime - lastFrameTime;
+        if (elapsedTime < targetFrameTime) {
+            double sleepTime = targetFrameTime - elapsedTime;
+            std::this_thread::sleep_for(std::chrono::milliseconds((int)(sleepTime * 1000.0)));
+        }
+        lastFrameTime = glfwGetTime();
+
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
@@ -145,7 +167,7 @@ int main() {
         glfwGetFramebufferSize(window, &display_w, &display_h);
 
         DrawEditorUI(display_w, display_h, editorCfg, materials, physicalMaterials, matFiles, currentFileName, currentMatIndex, 
-                     currentDefFile, currentPhysMatIndex, shapeType, lightMode, useNormal, useGloss, useLuma, 
+                     currentDefFile, currentPhysMatIndex, shapeType, lightMode, useNormal, useGloss, useLuma, useBump,
                      lightIntensity, lightColor, skyboxID, refreshData);
 
         ImGui::Render();
@@ -251,7 +273,7 @@ int main() {
         glUniform1i(glGetUniformLocation(shader, "useNormal"), 0);
         glUniform1i(glGetUniformLocation(shader, "useGloss"), 0);
         glUniform1i(glGetUniformLocation(shader, "useLuma"), 0);
-
+        glUniform1i(glGetUniformLocation(shader, "useBump"), 0);
         if (!materials.empty()) {
             Material& mat = materials[currentMatIndex];
             if (mat.textures.count("diffuse") && mat.textures["diffuse"] != 0) {
@@ -278,6 +300,12 @@ int main() {
                 glUniform1i(glGetUniformLocation(shader, "lumaMap"), 3);
                 glUniform1i(glGetUniformLocation(shader, "useLuma"), useLuma ? 1 : 0);
             }
+            if (mat.textures.count("bump") && mat.textures["bump"] != 0) {
+                glActiveTexture(GL_TEXTURE5);
+                glBindTexture(GL_TEXTURE_2D, mat.textures["bump"]);
+                glUniform1i(glGetUniformLocation(shader, "bumpMap"), 5);
+                glUniform1i(glGetUniformLocation(shader, "useBump"), useBump ? 1 : 0);
+            }
         }
 
         glUniform3fv(glGetUniformLocation(shader, "albedo"), 1, &albedo.r);
@@ -285,7 +313,10 @@ int main() {
         glUniform1f(glGetUniformLocation(shader, "roughness"), roughness);
         glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1, &finalLightPos.x);
         glUniform1f(glGetUniformLocation(shader, "lightIntensity"), lightIntensity);
-
+        if (!materials.empty()) {
+            Material& mat = materials[currentMatIndex];
+            glUniform1f(glGetUniformLocation(shader, "reliefScale"), mat.reliefScale);
+        }
         if(shapeType == 0) {
             glBindVertexArray(VAO_cube);
         glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);

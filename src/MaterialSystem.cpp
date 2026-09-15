@@ -149,6 +149,7 @@ void Material::updateBuffers() {
         if(p.first == "normalMap") strncpy(normalPath, p.second.c_str(), 255);
         if(p.first == "glossMap") strncpy(glossPath, p.second.c_str(), 255);
         if(p.first == "LumaMap") strncpy(lumaPath, p.second.c_str(), 255);
+        if(p.first == "bumpMap" || p.first == "bump") strncpy(bumpPath, p.second.c_str(), 255);
         if(p.first == "detailmap") strncpy(detailPath, p.second.c_str(), 255);
         if(p.first == "detailScale") strncpy(detailScale, p.second.c_str(), 63);
         if(p.first == "smoothness") try { smoothness = std::stof(p.second); } catch(...) {}
@@ -188,6 +189,7 @@ void Material::syncParams() {
     if(strlen(normalPath) > 0) setParam("normalMap", normalPath);
     if(strlen(glossPath) > 0) setParam("glossMap", glossPath);
     if(strlen(lumaPath) > 0) setParam("LumaMap", lumaPath);
+    if(strlen(bumpPath) > 0) setParam("bumpMap", bumpPath);
     if(strlen(detailPath) > 0) setParam("detailmap", detailPath);
     setParam("detailScale", detailScale);
     setParam("smoothness", std::to_string(smoothness));
@@ -210,6 +212,7 @@ void Material::loadTextures() {
         if(p.first == "normalMap") textures["normal"] = LoadDDSTexture(p.second);
         if(p.first == "glossMap") textures["gloss"] = LoadDDSTexture(p.second);
         if(p.first == "LumaMap") textures["luma"] = LoadDDSTexture(p.second);
+        if(p.first == "bumpMap" || p.first == "bump") textures["bump"] = LoadDDSTexture(p.second);
     }
 }
 

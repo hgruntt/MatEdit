@@ -19,6 +19,7 @@ struct Material {
     char normalPath[256] = "";
     char glossPath[256] = "";
     char lumaPath[256] = "";
+    char bumpPath[256] = "";     
     char detailPath[256] = "";
     char detailScale[64] = "1 1";
     float smoothness = 0.0f;

@@ -11,12 +11,14 @@ uniform sampler2D diffuseMap;
 uniform sampler2D normalMap;
 uniform sampler2D glossMap;
 uniform sampler2D lumaMap;
+uniform sampler2D bumpMap;
 uniform sampler2D skybox; 
 
 uniform int useDiffuse;
 uniform int useNormal;
 uniform int useGloss;
 uniform int useLuma;
+uniform int useBump;
 
 uniform vec3 albedo;
 uniform vec3 lightPos;
@@ -25,6 +27,7 @@ uniform vec3 lightColor;
 uniform float lightIntensity;
 uniform float smoothness;
 uniform float reflectScale;
+uniform float reliefScale;
 
 // Сэмплирование куба из атласа 4x3
 vec3 sampleSkybox(vec3 R) {
@@ -48,33 +51,54 @@ vec3 sampleSkybox(vec3 R) {
     return texture(skybox, uv).rgb;
 }
 
-void main() {
-    vec3 baseColor = albedo;
-    if (useDiffuse == 1) baseColor = texture(diffuseMap, TexCoord).rgb;
+vec2 ParallaxMapping(vec2 texCoords, vec3 viewDir, mat3 TBN) {
+    // Переводим направление взгляда в касательное пространство (Tangent Space)
+    vec3 V = normalize(viewDir * TBN);
     
+    // Получаем высоту из bump карты (используем красный или яркостный канал)
+    float height = texture(bumpMap, texCoords).r;
+    
+    // Смещение координат
+    vec2 p = V.xy / (V.z + 0.42) * (height * reliefScale);
+    return texCoords - p;
+}
+
+void main() {
     vec3 N = normalize(Normal);
+    vec3 I = normalize(FragPos - viewPos);
+    vec3 V = -I;
+
+    // Расчет базиса TBN (нужен и для Normal map, и для Bump map)
+    vec3 Q1 = dFdx(FragPos);
+    vec3 Q2 = dFdy(FragPos);
+    vec2 st1 = dFdx(TexCoord);
+    vec2 st2 = dFdy(TexCoord);
+    vec3 T = normalize(Q1 * st2.t - Q2 * st1.t);
+    vec3 B = -normalize(cross(N, T));
+    mat3 TBN = mat3(T, B, N);
+
+    // Применяем Parallax / Bump mapping к текстурным координатам если включено
+    vec2 sampledTexCoord = TexCoord;
+    if (useBump == 1) {
+        sampledTexCoord = ParallaxMapping(TexCoord, V, TBN);
+    }
+
+    vec3 baseColor = albedo;
+    if (useDiffuse == 1) baseColor = texture(diffuseMap, sampledTexCoord).rgb;
+    
     if (useNormal == 1) {
-        vec3 Q1 = dFdx(FragPos);
-        vec3 Q2 = dFdy(FragPos);
-        vec2 st1 = dFdx(TexCoord);
-        vec2 st2 = dFdy(TexCoord);
-        vec3 T = normalize(Q1 * st2.t - Q2 * st1.t);
-        vec3 B = -normalize(cross(N, T));
-        mat3 TBN = mat3(T, B, N);
-        vec3 mapN = texture(normalMap, TexCoord).rgb * 2.0 - 1.0;
+        vec3 mapN = texture(normalMap, sampledTexCoord).rgb * 2.0 - 1.0;
         N = normalize(TBN * mapN);
     }
     
     vec3 L = normalize(lightPos - FragPos);
-    vec3 I = normalize(FragPos - viewPos);
-    vec3 V = -I;
     vec3 H = normalize(L + V);
     vec3 R = reflect(I, N);
 
     float ao = 1.0;
     float specIntensity = 0.0;
     if (useGloss == 1) {
-        vec4 glossData = texture(glossMap, TexCoord);
+        vec4 glossData = texture(glossMap, sampledTexCoord);
         ao = mix(1.0, glossData.b, 0.5);
         specIntensity = dot(glossData.rgb, vec3(0.333));
     }
@@ -86,16 +110,9 @@ void main() {
     float spec = 0.0;
     if (useGloss == 1) {
         float shininess = 32.0; 
-        // L и V у нас уже есть. H (Halfway vector) тоже.
-        // Dot(N, H) — это основа блика.
         float dotNH = max(dot(N, H), 0.0);
         spec = pow(dotNH, shininess);
-        
-        // Читаем текстуру glossMap
-        float glossVal = texture(glossMap, TexCoord).r;
-        
-        // ВАЖНО: Если glossVal в текстуре везде 0, блика не будет. 
-        // Добавим +0.1 для теста, чтобы увидеть хоть что-то
+        float glossVal = texture(glossMap, sampledTexCoord).r;
         spec *= (glossVal) * smoothness; 
     }
     
@@ -107,7 +124,7 @@ void main() {
     vec3 lighting = (ambient + diff * lightFactor) * baseColor + (spec) * lightFactor;
     
     if (useLuma == 1) {
-        lighting += texture(lumaMap, TexCoord).rgb *8.0; 
+        lighting += texture(lumaMap, sampledTexCoord).rgb * 8.0; 
     }
     
     FragColor = vec4(lighting, 1.0);

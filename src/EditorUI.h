@@ -21,6 +21,7 @@ void DrawEditorUI(
     bool& useNormal,
     bool& useGloss,
     bool& useLuma,
+    bool& useBump,
     float& lightIntensity,
     float* lightColor,
     GLuint& skyboxID,

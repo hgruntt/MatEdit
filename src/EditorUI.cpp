@@ -82,6 +82,7 @@ void DrawEditorUI(
     bool& useNormal,
     bool& useGloss,
     bool& useLuma,
+    bool& useBump,
     float& lightIntensity,
     float* lightColor,
     GLuint& skyboxID,
@@ -230,6 +231,7 @@ void DrawEditorUI(
                     ImGui::InputText("Normal", mat.normalPath, 256);
                     ImGui::InputText("Gloss", mat.glossPath, 256);
                     ImGui::InputText("Luma", mat.lumaPath, 256);
+                    ImGui::InputText("Bump Map", mat.bumpPath, 256);
                     ImGui::InputText("Detail", mat.detailPath, 256);
                }
                 ImGui::EndChild();
@@ -277,6 +279,7 @@ void DrawEditorUI(
                 ImGui::Checkbox("Normal Map", &useNormal);
                 ImGui::Checkbox("Gloss Map", &useGloss);
                 ImGui::Checkbox("Luma Map", &useLuma);
+                ImGui::Checkbox("Use Bump", &useBump);
 
                 ImGui::Combo("Light Mode", &lightMode, "Camera\0Fixed\0");
                 ImGui::SliderFloat("Intensity", &lightIntensity, 0.0f, 5.0f);
