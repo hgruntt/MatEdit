@@ -146,28 +146,38 @@ void DrawEditorUI(
           // Попап для создания нового .def файла
         if (ImGui::BeginPopupModal("New .def", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
             static char newDefFileName[128] = "materials.def";
-            ImGui::Text("Enter new .def file name (inside scripts/ or root):");
-            ImGui::InputText("##newDefFileName", newDefFileName, sizeof(newDefFileName));
 
-            if (ImGui::Button("Create", ImVec2(120, 0))) {
-                std::string fileNameStr = std::string(newDefFileName);
-                if (fileNameStr.find(".def") == std::string::npos) fileNameStr += ".def";
+            // Проверяем существование файла заранее
+            std::string fileNameStr = std::string(newDefFileName);
+            if (fileNameStr.find(".def") == std::string::npos) fileNameStr += ".def";
 
-                fs::path targetDir = gameRootPath / "scripts";
-                if (!fs::exists(targetDir)) fs::create_directories(targetDir);
-                fs::path fullDefPath = targetDir / fileNameStr;
+            fs::path targetDir = gameRootPath / "scripts";
+            fs::path fullDefPath = targetDir / fileNameStr;
+            fs::path rootDefPath = gameRootPath / fileNameStr;
 
-                if (!fs::exists(fullDefPath)) {
-                    std::ofstream newFile(fullDefPath);
-                    if (newFile.is_open()) {
-                        newFile << "\"default\"\n{\n\t\"impact_decal\"\t\"shot\"\n\t\"impact_sound\"\t\"debris/concrete1.wav\"\n}\n";
-                        newFile.close();
+            bool fileExists = fs::exists(fullDefPath) || fs::exists(rootDefPath);
+
+            if (fileExists) {
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s already exist", fileNameStr.c_str());
+            }
+            else{
+                ImGui::Text("Create new .def file?");
+                if (ImGui::Button("Create", ImVec2(120, 0))) {
+                    if (!fileExists) {
+                        if (!fs::exists(targetDir)) fs::create_directories(targetDir);
+
+                        std::ofstream newFile(fullDefPath);
+                        if (newFile.is_open()) {
+                            newFile << "\"default\"\n{\n\t\"impact_decal\"\t\"shot\"\n\t\"impact_sound\"\t\"debris/concrete1.wav\"\n}\n";
+                            newFile.close();
+                        }
+                        refreshDataFunc(currentFileName, currentMatIndex);
+                        ImGui::CloseCurrentPopup();
                     }
                 }
-                refreshDataFunc(currentFileName, currentMatIndex);
-                ImGui::CloseCurrentPopup();
+                ImGui::SameLine();
             }
-            ImGui::SameLine();
+ 
             if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
@@ -206,6 +216,21 @@ void DrawEditorUI(
                     ImGui::TextColored(ImVec4(1,0,0,1), "No .mat files found!");
                 }
 
+                // Кнопка добавления нового материала в текущий .mat файл
+                if (!matFiles.empty() && currentFileName != "None") {
+                    if (ImGui::Button("Add New Material", ImVec2(-1, 0))) {
+                        Material newMat;
+                        newMat.name = "new_material";
+                        strncpy(newMat.diffusePath, "textures/default", sizeof(newMat.diffusePath) - 1);
+                        newMat.smoothness = 1.0f;
+                        newMat.reflectScale = 0.3f;
+                        newMat.syncParams();
+                        materials.push_back(newMat);
+                        currentMatIndex = static_cast<int>(materials.size()) - 1;
+                        materials[currentMatIndex].loadTextures();
+                        SaveAllMaterials(currentFileName, materials);
+                    }
+                }
                 if (!materials.empty() && currentMatIndex < materials.size()) {
                     static char nameBuffer[128];
                     static int lastMatIndex = -1;
