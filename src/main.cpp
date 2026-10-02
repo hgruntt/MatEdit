@@ -18,6 +18,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include "Config.h"
+#include "I18n.h"
 #include "MaterialSystem.h"
 #include "Shader.h"
 #include "PostProcess.h"
@@ -301,8 +302,8 @@ static void DestroyViewportFramebuffer(ViewportFramebuffer& target) {
 static bool EnsureViewportFramebuffer(ViewportFramebuffer& target, int width, int height, int requestedSamples) {
     width = std::max(1, width);
     height = std::max(1, height);
-    GLint maxSamples = 1;
-    glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
+    static GLint maxSamples = 0;
+    if (maxSamples == 0) glGetIntegerv(GL_MAX_SAMPLES, &maxSamples);
     const int samples = std::clamp(requestedSamples, 1, std::max(1, maxSamples));
     if (target.fbo != 0 && target.width == width && target.height == height && target.samples == samples) return true;
     DestroyViewportFramebuffer(target);
@@ -367,6 +368,7 @@ int main() {
 
     EditorConfig editorCfg;
     LoadConfig(editorCfg);
+    SetLanguage(editorCfg.language);
     if (editorCfg.taaEnabled) {
         editorCfg.fxaaEnabled = false;
         editorCfg.msaaEnabled = false;
@@ -388,12 +390,13 @@ int main() {
         return -1;
     }
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(0);
+    glfwSwapInterval(editorCfg.vsyncEnabled ? 1 : 0);
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         glfwDestroyWindow(window);
         glfwTerminate();
         return -1;
     }
+    SetTextureFilteringEnabled(editorCfg.textureFilteringEnabled);
 
     glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 
@@ -508,7 +511,7 @@ int main() {
 
             bool loadedMatFile = false;
             for (const auto& candidate : candidates) {
-                if (!LoadAllMaterials(candidate, materials)) continue;
+                if (!LoadAllMaterials(candidate, materials, editorCfg.autoAssignMaterialTextures)) continue;
                 currFile = candidate;
                 loadedMatFile = true;
                 break;
@@ -568,6 +571,9 @@ int main() {
     }
 
     GLuint skyboxShader = LoadSkyboxShader();
+    const GLint skyboxViewUniform = skyboxShader ? glGetUniformLocation(skyboxShader, "view") : -1;
+    const GLint skyboxProjectionUniform = skyboxShader ? glGetUniformLocation(skyboxShader, "projection") : -1;
+    const GLint skyboxSamplerUniform = skyboxShader ? glGetUniformLocation(skyboxShader, "skybox") : -1;
     GLuint fxaaShader = LoadFXAAShader();
     FXAATarget fxaaTarget;
     GLuint taaShader = LoadTAAShader();
@@ -604,10 +610,12 @@ int main() {
         GLint view;
         GLint projection;
         GLint useDiffuse;
+        GLint useDiffuseAlpha;
         GLint useNormal;
         GLint normalMapMode;
         GLint hasNormalMap;
         GLint diffuseIsSRGB;
+        GLint glossIsSRGB;
         GLint useGloss;
         GLint useLuma;
         GLint useBump;
@@ -640,10 +648,12 @@ int main() {
               view(glGetUniformLocation(program, "view")),
               projection(glGetUniformLocation(program, "projection")),
               useDiffuse(glGetUniformLocation(program, "useDiffuse")),
+              useDiffuseAlpha(glGetUniformLocation(program, "useDiffuseAlpha")),
               useNormal(glGetUniformLocation(program, "useNormal")),
               normalMapMode(glGetUniformLocation(program, "normalMapMode")),
               hasNormalMap(glGetUniformLocation(program, "hasNormalMap")),
               diffuseIsSRGB(glGetUniformLocation(program, "diffuseIsSRGB")),
+              glossIsSRGB(glGetUniformLocation(program, "glossIsSRGB")),
               useGloss(glGetUniformLocation(program, "useGloss")),
               useLuma(glGetUniformLocation(program, "useLuma")),
               useBump(glGetUniformLocation(program, "useBump")),
@@ -722,6 +732,17 @@ int main() {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+#ifdef MATEDIT_FONT_PATH
+    ImFont* uiFont = ImGui::GetIO().Fonts->AddFontFromFileTTF(
+        MATEDIT_FONT_PATH, 13.0f, nullptr, ImGui::GetIO().Fonts->GetGlyphRangesCyrillic());
+    if (uiFont) {
+        ImGui::GetIO().FontDefault = uiFont;
+    } else {
+        std::cerr << "Failed to load UI font with Cyrillic glyphs: " << MATEDIT_FONT_PATH << '\n';
+    }
+#else
+    ImGui::GetIO().Fonts->AddFontDefault();
+#endif
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
     InitUI();
@@ -729,26 +750,34 @@ int main() {
 
     bool hWasDown = false;
     bool modelWasDown = false;
+    bool pWasDown = false;
+    bool hasRenderedFrame = false;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
+        if (hasRenderedFrame &&
+            (glfwGetWindowAttrib(window, GLFW_ICONIFIED) || glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_FALSE)) {
+            glfwWaitEventsTimeout(0.1);
+            previousFrameTime = glfwGetTime();
+            hWasDown = false;
+            modelWasDown = false;
+            pWasDown = false;
+            zWasDown = false;
+            continue;
+        }
+
         ImGuiIO& hotkeyIO = ImGui::GetIO();
         const bool hDown = glfwGetKey(window, editorCfg.keyTogglePanels) == GLFW_PRESS;
-        if (hDown && !hWasDown && !hotkeyIO.WantTextInput && !hotkeyIO.WantCaptureKeyboard) ToggleEditorPanels();
+        if (hDown && !hWasDown && !hotkeyIO.WantTextInput && !hotkeyIO.WantCaptureKeyboard && IsEditorViewportHovered()) ToggleEditorPanels();
         hWasDown = hDown;
 
         const bool modelDown = glfwGetKey(window, editorCfg.keyToggleModel) == GLFW_PRESS;
         if (modelDown && !modelWasDown && !hotkeyIO.WantTextInput && !hotkeyIO.WantCaptureKeyboard && (IsEditorViewportHovered() || !flightMode)) modelVisible = !modelVisible;
         modelWasDown = modelDown;
 
-        static bool pWasDown = false;
         const bool pDown = glfwGetKey(window, editorCfg.keyOpenSettings) == GLFW_PRESS;
         if (pDown && !pWasDown && !hotkeyIO.WantTextInput && !hotkeyIO.WantCaptureKeyboard) OpenEditorSettings();
         pWasDown = pDown;
-
-        if (glfwGetWindowAttrib(window, GLFW_ICONIFIED) || glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_FALSE) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -959,9 +988,9 @@ int main() {
         if (!IsMaterialCreatorOpen() && skyboxTexture != 0 && skyboxShader != 0) {
             glUseProgram(skyboxShader);
             const glm::mat4 skyboxView = glm::mat4(glm::mat3(view));
-            glUniformMatrix4fv(glGetUniformLocation(skyboxShader, "view"), 1, GL_FALSE, glm::value_ptr(skyboxView));
-            glUniformMatrix4fv(glGetUniformLocation(skyboxShader, "projection"), 1, GL_FALSE, glm::value_ptr(proj));
-            glUniform1i(glGetUniformLocation(skyboxShader, "skybox"), 4);
+            glUniformMatrix4fv(skyboxViewUniform, 1, GL_FALSE, glm::value_ptr(skyboxView));
+            glUniformMatrix4fv(skyboxProjectionUniform, 1, GL_FALSE, glm::value_ptr(proj));
+            glUniform1i(skyboxSamplerUniform, 4);
             glActiveTexture(GL_TEXTURE4);
             glBindTexture(GL_TEXTURE_CUBE_MAP, skyboxTexture);
             glDepthFunc(GL_LEQUAL);
@@ -983,10 +1012,12 @@ int main() {
         glUniformMatrix4fv(uniforms.model, 1, GL_FALSE, glm::value_ptr(model));
 
         glUniform1i(uniforms.useDiffuse, 0);
+        glUniform1i(uniforms.useDiffuseAlpha, 0);
         glUniform1i(uniforms.useNormal, 0);
         glUniform1i(uniforms.normalMapMode, 0);
         glUniform1i(uniforms.hasNormalMap, 0);
         glUniform1i(uniforms.diffuseIsSRGB, 0);
+        glUniform1i(uniforms.glossIsSRGB, 0);
         glUniform1i(uniforms.useGloss, 0);
         glUniform1i(uniforms.useLuma, 0);
         glUniform1i(uniforms.useBump, 0);
@@ -994,6 +1025,7 @@ int main() {
         glUniform2f(uniforms.detailScale, 1.0f, 1.0f);
         glUniform2f(uniforms.textureScale, 1.0f, 1.0f);
         glUniform1i(uniforms.useSkybox, (!IsMaterialCreatorOpen() && skyboxTexture != 0) ? 1 : 0);
+        bool diffuseWadTransparencyEnabled = false;
 
         if (!materials.empty() && currentMatIndex >= 0 && static_cast<std::size_t>(currentMatIndex) < materials.size()) {
             Material& mat = materials[currentMatIndex];
@@ -1007,6 +1039,8 @@ int main() {
                 const bool diffuseNeedsNoDecode = !diffuseInfo.valid || diffuseInfo.srgb;
                 glUniform1i(uniforms.diffuseIsSRGB, diffuseNeedsNoDecode ? 1 : 0);
                 glUniform1i(uniforms.useDiffuse, mat.diffuseVisible ? 1 : 0);
+                diffuseWadTransparencyEnabled = mat.diffuseVisible && mat.diffuseWadTransparency;
+                glUniform1i(uniforms.useDiffuseAlpha, diffuseWadTransparencyEnabled ? 1 : 0);
             }
             auto normalIt = mat.textures.find("normal");
             if (normalIt != mat.textures.end() && normalIt->second != 0) {
@@ -1021,6 +1055,8 @@ int main() {
             if (glossIt != mat.textures.end() && glossIt->second != 0) {
                 glActiveTexture(GL_TEXTURE2);
                 glBindTexture(GL_TEXTURE_2D, glossIt->second);
+                const TextureFormatInfo glossInfo = GetTextureFormatInfo(glossIt->second);
+                glUniform1i(uniforms.glossIsSRGB, glossInfo.srgb ? 1 : 0);
                 glUniform1i(uniforms.useGloss, useGloss && mat.glossVisible ? 1 : 0);
             }
             auto lumaIt = mat.textures.find("luma");
@@ -1105,6 +1141,7 @@ int main() {
 
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
+        hasRenderedFrame = true;
     }
 
     StopContributorRefresh();

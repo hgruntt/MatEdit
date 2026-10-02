@@ -33,6 +33,7 @@ struct Material {
     int swayHeight = 0;
     int matTypeIndex = 0;
     bool diffuseVisible = true;
+    bool diffuseWadTransparency = false;
     bool normalVisible = true;
     bool glossVisible = true;
     bool lumaVisible = true;
@@ -61,11 +62,14 @@ struct PhysicalMaterialEntry {
 std::vector<std::string> LoadPhysicalMaterialTypes();
 GLuint LoadDDSTexture(const std::string& path);
 void ReleaseDDSTexture(GLuint texture);
-GLuint LoadTextureReference(const std::string& reference);
+GLuint LoadTextureReference(const std::string& reference, bool* goldSrcWadTransparency = nullptr);
 GLuint LoadDDS_Cubemap(const std::string& path);
+void SetTextureFilteringEnabled(bool enabled);
 
-bool LoadAllMaterials(const std::string& path, std::vector<Material>& materials);
-void SaveAllMaterials(const std::string& path, const std::vector<Material>& materials);
+void RefreshMaterialTextureIndex();
+bool AutoAssignMaterialTexturesByName(Material& material);
+bool LoadAllMaterials(const std::string& path, std::vector<Material>& materials, bool autoAssignTextures = false);
+bool SaveAllMaterials(const std::string& path, const std::vector<Material>& materials);
 void LoadAllPhysicalMaterials(const std::string& path, std::vector<PhysicalMaterialEntry>& physMats);
 void SaveAllPhysicalMaterials(const std::string& path, const std::vector<PhysicalMaterialEntry>& physMats);
 
@@ -89,6 +93,9 @@ struct WadArchive {
     std::string relativePath;
     std::string displayName;
     std::vector<WadTexture> textures;
+    std::uint64_t sourceSize = 0;
+    std::uint64_t contentHashFirst = 0;
+    std::uint64_t contentHashSecond = 0;
 };
 
 
@@ -112,6 +119,7 @@ void ScanAndLoadAllWads();
 void ClearWadArchives();
 std::vector<std::string> GetLoadedWadPaths();
 std::string MakeWadTextureReference(const WadArchive& wad, const WadTexture& texture);
+std::string ResolveWadTextureReference(const std::string& reference);
 
 struct TexturePixels {
     int width = 0;
@@ -120,9 +128,55 @@ struct TexturePixels {
 };
 
 bool LoadTexturePixels(const std::string& reference, TexturePixels& pixels);
-TexturePreviewInfo GenerateNormalMapPreviewTexture(const std::string& source, float strength, bool flipX, bool flipY, bool fullZRange, int heightChannel, bool invertHeight, float sharpness, bool mipmaps);
-TexturePreviewInfo GenerateGlossMapPreviewTexture(const std::string& source, float contrast, float brightness, float power, bool invert, int metric, float lowerThreshold, float upperThreshold, bool normalize, float sharpness, bool mipmaps);
-TexturePreviewInfo GenerateBumpMapPreviewTexture(const std::string& source, int heightChannel, bool invert, float contrast, float brightness, bool normalize, float sharpness, bool mipmaps);
-bool GenerateNormalMapDDS(const std::string& source, const std::string& outputPath, float strength, bool flipX, bool flipY, bool fullZRange, int heightChannel, bool invertHeight, float sharpness, bool mipmaps, int format);
-bool GenerateGlossMapDDS(const std::string& source, const std::string& outputPath, float contrast, float brightness, float power, bool invert, int metric, float lowerThreshold, float upperThreshold, bool normalize, float sharpness, bool mipmaps, int format);
-bool GenerateBumpMapDDS(const std::string& source, const std::string& outputPath, int heightChannel, bool invert, float contrast, float brightness, bool normalize, float sharpness, bool mipmaps, int format);
+
+struct NormalMapSettings {
+    float strength = 2.0f;
+    bool flipX = false;
+    bool flipY = true;
+    bool fullZRange = false;
+    int heightChannel = 0;
+    bool invertHeight = false;
+    float sharpness = 0.0f;
+    bool mipmaps = true;
+    float blackPoint = 0.0f;
+    float whitePoint = 1.0f;
+    float smoothing = 0.0f;
+    int gradientFilter = 0;
+    bool tileEdges = false;
+};
+
+struct GlossMapSettings {
+    float contrast = 1.0f;
+    float brightness = 0.0f;
+    float power = 1.0f;
+    bool invert = false;
+    float lowerThreshold = 0.0f;
+    float upperThreshold = 1.0f;
+    bool normalize = true;
+    float sharpness = 0.0f;
+    bool mipmaps = true;
+    int sourceMode = 0;
+    float softness = 0.0f;
+};
+
+struct BumpMapSettings {
+    int heightChannel = 1;
+    bool invert = false;
+    float contrast = 1.0f;
+    float brightness = 0.0f;
+    bool normalize = false;
+    float sharpness = 0.0f;
+    bool mipmaps = true;
+    float blackPoint = 0.0f;
+    float whitePoint = 1.0f;
+    float gamma = 1.0f;
+    float smoothing = 0.0f;
+    bool tileEdges = false;
+};
+
+TexturePreviewInfo GenerateNormalMapPreviewTexture(const std::string& source, const NormalMapSettings& settings);
+TexturePreviewInfo GenerateGlossMapPreviewTexture(const std::string& source, const GlossMapSettings& settings);
+TexturePreviewInfo GenerateBumpMapPreviewTexture(const std::string& source, const BumpMapSettings& settings);
+bool GenerateNormalMapDDS(const std::string& source, const std::string& outputPath, const NormalMapSettings& settings, int format);
+bool GenerateGlossMapDDS(const std::string& source, const std::string& outputPath, const GlossMapSettings& settings, int format);
+bool GenerateBumpMapDDS(const std::string& source, const std::string& outputPath, const BumpMapSettings& settings, int format);

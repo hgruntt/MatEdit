@@ -1,5 +1,6 @@
 #include "MaterialSystem.h"
 #include "ImageLoader.h"
+#include "Config.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -11,9 +12,14 @@
 #include <cstdint>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <memory>
 #include <unordered_set>
 #include <unordered_map>
 #include <gli/gli.hpp>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 fs::path gameRootPath = "";
 std::vector<std::string> physicalMaterialTypes = {"default"};
@@ -56,16 +62,109 @@ std::string ToLower(std::string value) {
     return value;
 }
 
+fs::path g_materialTextureIndexRoot;
+std::unordered_map<std::string, std::vector<fs::path>> g_materialTextureIndex;
+
+void RebuildMaterialTextureIndex() {
+    g_materialTextureIndexRoot.clear();
+    g_materialTextureIndex.clear();
+    if (gameRootPath.empty()) return;
+
+    std::error_code rootError;
+    const fs::path normalizedRoot = fs::weakly_canonical(gameRootPath, rootError);
+    if (rootError) return;
+    g_materialTextureIndexRoot = normalizedRoot;
+
+    std::error_code ec;
+    fs::recursive_directory_iterator it(normalizedRoot, fs::directory_options::skip_permission_denied, ec);
+    const fs::recursive_directory_iterator end;
+    while (it != end) {
+        if (ec) {
+            ec.clear();
+            it.increment(ec);
+            continue;
+        }
+        std::error_code typeError;
+        if (it->is_regular_file(typeError) && !typeError &&
+            ToLower(it->path().extension().string()) == ".dds") {
+            g_materialTextureIndex[ToLower(it->path().filename().string())].push_back(it->path());
+        }
+        it.increment(ec);
+    }
+}
+
+std::string FindMaterialTextureReferenceByName(const std::string& textureName) {
+    if (gameRootPath.empty() || textureName.empty()) return {};
+    const std::string fileName = fs::path(textureName).stem().string() + ".dds";
+
+    std::error_code rootError;
+    const fs::path normalizedRoot = fs::weakly_canonical(gameRootPath, rootError);
+    if (rootError) return {};
+    if (g_materialTextureIndexRoot != normalizedRoot) {
+        RebuildMaterialTextureIndex();
+    }
+
+    const auto matches = g_materialTextureIndex.find(ToLower(fileName));
+    if (matches != g_materialTextureIndex.end() && !matches->second.empty()) {
+        const fs::path texturesRoot = normalizedRoot / "textures";
+        const fs::path& candidate = *std::min_element(matches->second.begin(), matches->second.end(),
+            [&](const fs::path& left, const fs::path& right) {
+                const bool leftInTextures = left.parent_path() == texturesRoot;
+                const bool rightInTextures = right.parent_path() == texturesRoot;
+                if (leftInTextures != rightInTextures) return leftInTextures;
+                return ToLower(left.generic_string()) < ToLower(right.generic_string());
+            });
+        std::error_code ec;
+        const fs::path relative = fs::relative(candidate, gameRootPath, ec);
+        return ec ? candidate.generic_string() : relative.generic_string();
+    }
+
+    return ResolveWadTextureReference(textureName);
+}
+
 struct CachedDDS {
     GLuint texture = 0;
     std::filesystem::file_time_type writeTime{};
+    std::uintmax_t fileSize = 0;
     std::size_t refs = 0;
     TextureFormatInfo formatInfo{};
 };
 
 std::unordered_map<std::string, CachedDDS> g_ddsCache;
+std::unordered_map<GLuint, std::size_t> g_retiredDDSTextures;
 std::unordered_map<GLuint, TextureFormatInfo> g_textureFormatInfo;
+std::unordered_map<GLuint, GLint> g_textureMaxMipLevels;
+bool g_textureFilteringEnabled = true;
 std::vector<WadArchive> g_wadArchives;
+std::unordered_map<std::string, std::size_t> g_wadArchiveLookup;
+std::unordered_map<std::string, std::pair<std::size_t, std::size_t>> g_wadTextureLookup;
+std::unordered_map<std::string, std::pair<std::size_t, std::size_t>> g_wadTextureNameLookup;
+struct CachedWadFile {
+    std::shared_ptr<std::vector<std::uint8_t>> data;
+    std::uint64_t sourceSize = 0;
+    std::uint64_t hashFirst = 0;
+    std::uint64_t hashSecond = 0;
+    std::uint64_t lastUse = 0;
+};
+constexpr std::size_t kWadFileCacheLimit = 128u * 1024u * 1024u;
+std::unordered_map<std::string, CachedWadFile> g_wadFileCache;
+std::size_t g_wadFileCacheBytes = 0;
+std::uint64_t g_wadCacheClock = 0;
+
+std::string MakeWadTextureLookupKey(const std::string& wadPath, const std::string& textureName) {
+    return ToLower(wadPath) + '\0' + ToLower(textureName);
+}
+
+bool FindWadTexture(const std::string& wadPath, const std::string& textureName,
+                    const WadArchive*& wad, const WadTexture*& texture) {
+    const auto lookup = g_wadTextureLookup.find(MakeWadTextureLookupKey(wadPath, textureName));
+    if (lookup == g_wadTextureLookup.end() || lookup->second.first >= g_wadArchives.size()) return false;
+    const WadArchive& candidateWad = g_wadArchives[lookup->second.first];
+    if (lookup->second.second >= candidateWad.textures.size()) return false;
+    wad = &candidateWad;
+    texture = &candidateWad.textures[lookup->second.second];
+    return true;
+}
 
 std::string NormalizeMaterialTextureReference(std::string value) {
     const std::string lower = ToLower(value);
@@ -175,8 +274,37 @@ struct UploadedDDS {
     TextureFormatInfo formatInfo{};
 };
 
+void ApplyTextureSampling(GLuint texture, GLint maxMipLevel) {
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, g_textureFilteringEnabled ? maxMipLevel : 0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    g_textureFilteringEnabled && maxMipLevel > 0 ? GL_LINEAR_MIPMAP_LINEAR :
+                    (g_textureFilteringEnabled ? GL_LINEAR : GL_NEAREST));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, g_textureFilteringEnabled ? GL_LINEAR : GL_NEAREST);
+}
+
+void RegisterTextureSampling(GLuint texture, GLint maxMipLevel) {
+    if (texture == 0) return;
+    g_textureMaxMipLevels[texture] = std::max(0, maxMipLevel);
+    ApplyTextureSampling(texture, g_textureMaxMipLevels[texture]);
+}
+
+GLint GetFullMipLevel(int width, int height) {
+    GLint level = 0;
+    for (int size = std::max(width, height); size > 1; size /= 2) ++level;
+    return level;
+}
+
 UploadedDDS UploadDDS2D(const gli::texture& texture, const std::string& sourcePath) {
     if (texture.empty() || texture.levels() == 0) return {};
+
+    GLenum previousError = glGetError();
+    while (previousError != GL_NO_ERROR) {
+        std::cerr << "MatEdit: clearing pre-existing OpenGL error before DDS upload (0x"
+                  << std::hex << previousError << std::dec << ")" << std::endl;
+        previousError = glGetError();
+    }
 
     gli::gl GL(gli::gl::PROFILE_GL33);
     const gli::gl::format Format = GL.translate(texture.format(), texture.swizzles());
@@ -195,6 +323,7 @@ UploadedDDS UploadDDS2D(const gli::texture& texture, const std::string& sourcePa
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    RegisterTextureSampling(textureID, static_cast<GLint>(texture.levels() - 1));
 
     const bool compressed = Format.External == GL_NONE || Format.Type == GL_NONE;
     const TextureFormatInfo formatInfo = DetectTextureFormatInfo(Format.Internal, Format.External);
@@ -231,9 +360,12 @@ UploadedDDS UploadDDS2D(const gli::texture& texture, const std::string& sourcePa
         }
     }
 
-    if (glGetError() != GL_NO_ERROR) {
+    const GLenum uploadError = glGetError();
+    if (uploadError != GL_NO_ERROR) {
+        g_textureMaxMipLevels.erase(textureID);
         glDeleteTextures(1, &textureID);
-        std::cerr << "Failed to upload DDS texture: " << sourcePath << std::endl;
+        std::cerr << "Failed to upload DDS texture: " << sourcePath
+                  << " (OpenGL error 0x" << std::hex << uploadError << std::dec << ")" << std::endl;
         return {};
     }
 
@@ -242,6 +374,17 @@ UploadedDDS UploadDDS2D(const gli::texture& texture, const std::string& sourcePa
     uploaded.formatInfo = formatInfo;
     return uploaded;
 }
+}
+
+void SetTextureFilteringEnabled(bool enabled) {
+    g_textureFilteringEnabled = enabled;
+    GLint previousTexture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    for (const auto& [texture, maxMipLevel] : g_textureMaxMipLevels) {
+        if (glIsTexture(texture) == GL_FALSE) continue;
+        ApplyTextureSampling(texture, maxMipLevel);
+    }
+    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture));
 }
 
 GLuint LoadDDSTexture(const std::string& path) {
@@ -253,17 +396,20 @@ GLuint LoadDDSTexture(const std::string& path) {
     if (!ec) fullPath = canonicalPath;
     ec.clear();
     const std::string key = fullPath.generic_string();
-    const auto writeTime = fs::exists(fullPath, ec) ? fs::last_write_time(fullPath, ec) : fs::file_time_type{};
+    const bool fileExists = fs::exists(fullPath, ec) && !ec;
+    const auto writeTime = fileExists ? fs::last_write_time(fullPath, ec) : fs::file_time_type{};
+    const bool hasWriteTime = fileExists && !ec;
+    ec.clear();
+    const std::uintmax_t fileSize = fileExists ? fs::file_size(fullPath, ec) : 0;
+    const bool hasFileFingerprint = hasWriteTime && !ec;
     auto cacheIt = g_ddsCache.find(key);
     if (cacheIt != g_ddsCache.end()) {
-        if (!ec && cacheIt->second.texture != 0 && cacheIt->second.writeTime == writeTime) {
+        if (hasFileFingerprint && cacheIt->second.texture != 0 &&
+            cacheIt->second.writeTime == writeTime && cacheIt->second.fileSize == fileSize) {
             ++cacheIt->second.refs;
             return cacheIt->second.texture;
         }
-        if (cacheIt->second.texture != 0) {
-            g_textureFormatInfo.erase(cacheIt->second.texture);
-            glDeleteTextures(1, &cacheIt->second.texture);
-        }
+        if (cacheIt->second.texture != 0) g_retiredDDSTextures[cacheIt->second.texture] = cacheIt->second.refs;
         g_ddsCache.erase(cacheIt);
     }
 
@@ -276,7 +422,7 @@ GLuint LoadDDSTexture(const std::string& path) {
     const UploadedDDS uploaded = UploadDDS2D(texture, ddsFilePath);
     if (uploaded.texture == 0) return 0;
 
-    g_ddsCache.emplace(key, CachedDDS{uploaded.texture, writeTime, 1, uploaded.formatInfo});
+    g_ddsCache.emplace(key, CachedDDS{uploaded.texture, writeTime, fileSize, 1, uploaded.formatInfo});
     g_textureFormatInfo[uploaded.texture] = uploaded.formatInfo;
     return uploaded.texture;
 }
@@ -289,12 +435,26 @@ void ReleaseDDSTexture(GLuint texture) {
             --it->second.refs;
         } else {
             g_textureFormatInfo.erase(it->second.texture);
+            g_textureMaxMipLevels.erase(it->second.texture);
             glDeleteTextures(1, &it->second.texture);
             g_ddsCache.erase(it);
         }
         return;
     }
+    auto retiredIt = g_retiredDDSTextures.find(texture);
+    if (retiredIt != g_retiredDDSTextures.end()) {
+        if (retiredIt->second > 1) {
+            --retiredIt->second;
+        } else {
+            g_textureFormatInfo.erase(texture);
+            g_textureMaxMipLevels.erase(texture);
+            glDeleteTextures(1, &texture);
+            g_retiredDDSTextures.erase(retiredIt);
+        }
+        return;
+    }
     g_textureFormatInfo.erase(texture);
+    g_textureMaxMipLevels.erase(texture);
     glDeleteTextures(1, &texture);
 }
 
@@ -449,6 +609,29 @@ void Material::updateBuffers() {
             }
         }
     }
+    const bool hasSmoothness = std::any_of(params.begin(), params.end(), [](const auto& param) {
+        return ToLower(param.first) == "smoothness";
+    });
+    if (!hasSmoothness) {
+        const auto legacyGloss = std::find_if(params.begin(), params.end(), [](const auto& param) {
+            return ToLower(param.first) == "glossexp";
+        });
+        if (legacyGloss != params.end()) {
+            try {
+                const float exponent = std::clamp(std::stof(legacyGloss->second), 0.0f, 256.0f);
+                smoothness = std::sqrt(exponent / 256.0f);
+            } catch (...) {
+            }
+        }
+    }
+    params.erase(std::remove_if(params.begin(), params.end(), [](const auto& param) {
+        return ToLower(param.first) == "glossexp";
+    }), params.end());
+    if (!hasSmoothness) params.push_back({"smoothness", std::to_string(smoothness)});
+    if (diffusePath[0] == '\0') {
+        const std::string diffuseReference = FindMaterialTextureReferenceByName(name);
+        CopyString(diffusePath, sizeof(diffusePath), diffuseReference);
+    }
 }
 
 void Material::syncParams() {
@@ -484,7 +667,13 @@ void Material::syncParams() {
     CopyString(lumaPath, sizeof(lumaPath), normalizedLuma);
     CopyString(bumpPath, sizeof(bumpPath), normalizedBump);
     CopyString(detailPath, sizeof(detailPath), normalizedDetail);
-    setOptionalParam("diffuseMap", diffusePath);
+    const std::string materialStem = ToLower(fs::path(name).stem().string());
+    const std::string diffuseStem = ToLower(fs::path(diffusePath).stem().string());
+    if (diffusePath[0] != '\0' && diffuseStem != materialStem) {
+        setOptionalParam("diffuseMap", diffusePath);
+    } else {
+        setOptionalParam("diffuseMap", "");
+    }
     setOptionalParam("normalMap", normalPath);
     setOptionalParam("glossMap", glossPath);
     setOptionalParam("LumaMap", lumaPath);
@@ -502,6 +691,42 @@ void Material::syncParams() {
     if (matTypeIndex >= 0 && matTypeIndex < (int)physicalMaterialTypes.size()) {
         setParam("material", physicalMaterialTypes[matTypeIndex]);
     }
+        params.erase(std::remove_if(params.begin(), params.end(), [](const auto& param) {
+            return ToLower(param.first) == "glossexp";
+        }), params.end());
+}
+
+void RefreshMaterialTextureIndex() {
+    RebuildMaterialTextureIndex();
+}
+
+bool AutoAssignMaterialTexturesByName(Material& material) {
+    const std::string stem = fs::path(material.name).stem().string();
+    if (stem.empty() || gameRootPath.empty()) return false;
+
+    bool changed = false;
+    const auto assignIfMissing = [&](char* target, std::size_t capacity, const std::string& textureName) {
+        if (target[0] != '\0') return;
+        const std::string reference = FindMaterialTextureReferenceByName(textureName);
+        if (reference.empty()) return;
+        CopyString(target, capacity, reference);
+        changed = true;
+    };
+
+    assignIfMissing(material.diffusePath, sizeof(material.diffusePath), stem);
+    assignIfMissing(material.normalPath, sizeof(material.normalPath), stem + "_norm");
+    assignIfMissing(material.glossPath, sizeof(material.glossPath), stem + "_gloss");
+    if (material.glossPath[0] == '\0') {
+        assignIfMissing(material.glossPath, sizeof(material.glossPath), stem + "_pbr");
+    }
+    if (material.glossPath[0] == '\0') {
+        assignIfMissing(material.glossPath, sizeof(material.glossPath), stem + "_spec");
+    }
+    assignIfMissing(material.bumpPath, sizeof(material.bumpPath), stem + "_hmap");
+    assignIfMissing(material.lumaPath, sizeof(material.lumaPath), stem + "_luma");
+    assignIfMissing(material.detailPath, sizeof(material.detailPath), stem + "_detail");
+    if (changed) material.syncParams();
+    return changed;
 }
 
 void Material::releaseTextures() {
@@ -513,13 +738,21 @@ void Material::releaseTextures() {
 
 void Material::loadTextures() {
     releaseTextures();
+    diffuseWadTransparency = false;
+    bool diffuseLoaded = false;
     for (const auto& p : params) {
-        if (p.first == "diffuseMap") textures["diffuse"] = LoadTextureReference(p.second);
+        if (p.first == "diffuseMap") {
+            textures["diffuse"] = LoadTextureReference(p.second, &diffuseWadTransparency);
+            diffuseLoaded = true;
+        }
         if (p.first == "normalMap") textures["normal"] = LoadTextureReference(p.second);
         if (p.first == "glossMap") textures["gloss"] = LoadTextureReference(p.second);
         if (p.first == "LumaMap") textures["luma"] = LoadTextureReference(p.second);
         if (p.first == "bumpMap" || p.first == "bump") textures["bump"] = LoadTextureReference(p.second);
         if (p.first == "detailmap") textures["detail"] = LoadTextureReference(p.second);
+    }
+    if (!diffuseLoaded && diffusePath[0] != '\0') {
+        textures["diffuse"] = LoadTextureReference(diffusePath, &diffuseWadTransparency);
     }
 }
 
@@ -643,11 +876,12 @@ void SaveAllPhysicalMaterials(const std::string& path, const std::vector<Physica
     }
 }
 
-bool LoadAllMaterials(const std::string& path, std::vector<Material>& materials) {
+bool LoadAllMaterials(const std::string& path, std::vector<Material>& materials, bool autoAssignTextures) {
     fs::path fullPath = fs::path(path).is_absolute() ? fs::path(path) : (gameRootPath / path);
     std::ifstream file(fullPath);
     if (!file.is_open()) return false;
 
+    RefreshMaterialTextureIndex();
     std::vector<Material> loadedMaterials;
     std::string line, lastLine;
     Material* currentMat = nullptr;
@@ -683,30 +917,91 @@ bool LoadAllMaterials(const std::string& path, std::vector<Material>& materials)
     }
 
     if (file.bad()) return false;
+    std::vector<Material> uniqueMaterials;
+    std::unordered_map<std::string, std::size_t> materialIndices;
+    for (Material& loaded : loadedMaterials) {
+        const std::string key = ToLower(loaded.name);
+        const auto existing = materialIndices.find(key);
+        if (existing == materialIndices.end()) {
+            materialIndices.emplace(key, uniqueMaterials.size());
+            uniqueMaterials.push_back(std::move(loaded));
+            continue;
+        }
+
+        Material& original = uniqueMaterials[existing->second];
+        for (const auto& param : loaded.params) {
+            const bool alreadyPresent = std::any_of(original.params.begin(), original.params.end(), [&](const auto& existingParam) {
+                return existingParam.first == param.first;
+            });
+            if (!alreadyPresent) original.params.push_back(param);
+        }
+        original.updateBuffers();
+    }
     for (auto& material : materials) material.releaseTextures();
-    materials = std::move(loadedMaterials);
+    materials = std::move(uniqueMaterials);
+    if (autoAssignTextures) {
+        bool changed = false;
+        for (Material& material : materials) {
+            changed |= AutoAssignMaterialTexturesByName(material);
+        }
+        if (changed) SaveAllMaterials(path, materials);
+    }
     return true;
 }
 
-void SaveAllMaterials(const std::string& path, const std::vector<Material>& materials) {
+namespace {
+std::string CanonicalMaterialParamName(const std::string& name) {
+    const std::string lower = ToLower(name);
+    if (lower == "material") return "material";
+    if (lower == "smoothness") return "smoothness";
+    if (lower == "detailscale") return "detailScale";
+    if (lower == "detailmap") return "detailmap";
+    if (lower == "diffusemap") return "diffuseMap";
+    if (lower == "normalmap") return "normalMap";
+    if (lower == "glossmap") return "glossMap";
+    if (lower == "aberrationscale") return "aberrationScale";
+    if (lower == "reflectscale") return "reflectScale";
+    if (lower == "refractscale") return "refractScale";
+    if (lower == "swayheight") return "swayHeight";
+    if (lower == "reliefscale") return "reliefScale";
+    return {};
+}
+}
+
+bool SaveAllMaterials(const std::string& path, const std::vector<Material>& materials) {
     fs::path fullPath = fs::path(path).is_absolute() ? fs::path(path) : (gameRootPath / path);
     std::ofstream file(fullPath);
-    if (!file.is_open()) return;
+    if (!file.is_open()) {
+        std::cerr << "MatEdit: failed to open material file for writing: " << fullPath << std::endl;
+        return false;
+    }
     for (const auto& mat : materials) {
         file << "\"" << mat.name << "\"\n{\n";
+        std::unordered_set<std::string> writtenParams;
         for (const auto& p : mat.params) {
+            const std::string key = CanonicalMaterialParamName(p.first);
+            if (key.empty() || !writtenParams.insert(key).second) continue;
             std::string value = p.second;
-            if (p.first == "diffuseMap" || p.first == "normalMap" || p.first == "glossMap" ||
-                p.first == "LumaMap" || p.first == "bumpMap" || p.first == "bump" || p.first == "detailmap") {
+            if (key == "diffuseMap" || key == "normalMap" || key == "glossMap" || key == "detailmap") {
                 value = NormalizeMaterialTextureReference(value);
+                if (key == "diffuseMap" &&
+                    ToLower(fs::path(value).stem().string()) == ToLower(fs::path(mat.name).stem().string())) {
+                    continue;
+                }
                 if (ToLower(fs::path(value).extension().string()) == ".dds") {
                     value = fs::path(value).replace_extension().string();
                 }
             }
-            file << "\t\"" << p.first << "\"\t\"" << value << "\"\n";
+            file << "\t\"" << key << "\"\t\"" << value << "\"\n";
         }
         file << "}\n";
     }
+    file.flush();
+    if (!file) {
+        std::cerr << "MatEdit: failed to write material file: " << fullPath << std::endl;
+        return false;
+    }
+    return true;
 }
 
 namespace {
@@ -715,8 +1010,197 @@ struct WadHeaderRaw { char identification[4]; std::int32_t numLumps; std::int32_
 struct WadLumpRaw { std::int32_t filePos; std::int32_t diskSize; std::int32_t size; std::uint8_t type; std::uint8_t compression; std::uint16_t padding; char name[16]; };
 #pragma pack(pop)
 
-bool ReadWadArchive(const std::string& relativePath, WadArchive& out) {
+struct WadContentHash {
+    std::uint64_t first = 14695981039346656037ull;
+    std::uint64_t second = 7809847782465536322ull;
+};
+
+void UpdateWadHash(WadContentHash& hash, const char* data, std::size_t size) {
+    for (std::size_t i = 0; i < size; ++i) {
+        const auto byte = static_cast<std::uint8_t>(data[i]);
+        hash.first = (hash.first ^ byte) * 1099511628211ull;
+        hash.second ^= static_cast<std::uint64_t>(byte) + 0x9e3779b97f4a7c15ull + (hash.second << 6u) + (hash.second >> 2u);
+        hash.second *= 0xbf58476d1ce4e5b9ull;
+    }
+}
+
+WadContentHash HashWadPath(const std::string& value) {
+    WadContentHash hash;
+    UpdateWadHash(hash, value.data(), value.size());
+    return hash;
+}
+
+bool GetWadFingerprint(const fs::path& path, std::uint64_t& size, WadContentHash& hash) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    file.seekg(0, std::ios::end);
+    const std::streamoff end = file.tellg();
+    if (end < 0) return false;
+    size = static_cast<std::uint64_t>(end);
+    file.seekg(0, std::ios::beg);
+
+    std::array<char, 64 * 1024> buffer{};
+    while (file) {
+        file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = file.gcount();
+        if (count > 0) UpdateWadHash(hash, buffer.data(), static_cast<std::size_t>(count));
+    }
+    return file.eof() && !file.bad();
+}
+
+fs::path GetWadCachePath(const std::string& sourceKey) {
+    const WadContentHash key = HashWadPath(sourceKey);
+    std::array<char, 48> filename{};
+    std::snprintf(filename.data(), filename.size(), "%016llx%016llx.wadcache",
+                  static_cast<unsigned long long>(key.first),
+                  static_cast<unsigned long long>(key.second));
+    return GetConfigDirectory() / "wad-cache" / filename.data();
+}
+
+template <typename T>
+bool ReadWadCacheValue(std::istream& stream, T& value) {
+    stream.read(reinterpret_cast<char*>(&value), sizeof(value));
+    return static_cast<bool>(stream);
+}
+
+template <typename T>
+bool WriteWadCacheValue(std::ostream& stream, const T& value) {
+    stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    return static_cast<bool>(stream);
+}
+
+bool LoadWadCache(const fs::path& cachePath, const std::string& sourceKey,
+                  std::uint64_t sourceSize, const WadContentHash& sourceHash, WadArchive& out) {
+    std::ifstream cache(cachePath, std::ios::binary);
+    if (!cache) return false;
+    std::array<char, 8> magic{};
+    cache.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+    if (!cache || magic != std::array<char, 8>{'M', 'A', 'T', 'W', 'A', 'D', '0', '1'}) return false;
+
+    std::uint32_t version = 0;
+    std::uint32_t pathLength = 0;
+    std::uint64_t cachedSize = 0;
+    std::uint64_t hashFirst = 0;
+    std::uint64_t hashSecond = 0;
+    std::uint32_t textureCount = 0;
+    if (!ReadWadCacheValue(cache, version) || version != 1 ||
+        !ReadWadCacheValue(cache, pathLength) || pathLength > 32768) return false;
+    std::string cachedPath(pathLength, '\0');
+    cache.read(cachedPath.data(), static_cast<std::streamsize>(cachedPath.size()));
+    if (!cache || cachedPath != sourceKey ||
+        !ReadWadCacheValue(cache, cachedSize) ||
+        !ReadWadCacheValue(cache, hashFirst) ||
+        !ReadWadCacheValue(cache, hashSecond) ||
+        !ReadWadCacheValue(cache, textureCount) ||
+        cachedSize != sourceSize || hashFirst != sourceHash.first || hashSecond != sourceHash.second ||
+        textureCount > 1000000) return false;
+
+    WadArchive cached;
+    cached.relativePath = out.relativePath;
+    cached.displayName = out.displayName;
+    cached.textures.reserve(textureCount);
+    for (std::uint32_t i = 0; i < textureCount; ++i) {
+        std::uint8_t nameLength = 0;
+        WadTexture texture;
+        std::int32_t width = 0;
+        std::int32_t height = 0;
+        if (!ReadWadCacheValue(cache, nameLength) || nameLength == 0 || nameLength > 16) return false;
+        texture.name.resize(nameLength);
+        cache.read(texture.name.data(), static_cast<std::streamsize>(texture.name.size()));
+        if (!cache || !ReadWadCacheValue(cache, width) || !ReadWadCacheValue(cache, height) ||
+            !ReadWadCacheValue(cache, texture.pixelOffset) || !ReadWadCacheValue(cache, texture.paletteOffset)) return false;
+        if (width <= 0 || height <= 0 || width > 8192 || height > 8192 ||
+            static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) > 64ull * 1024ull * 1024ull ||
+            texture.pixelOffset == 0 || texture.paletteOffset == 0 ||
+            static_cast<std::uint64_t>(texture.pixelOffset) + static_cast<std::uint64_t>(width) * height > sourceSize ||
+            static_cast<std::uint64_t>(texture.paletteOffset) + 770ull > sourceSize) return false;
+        texture.width = width;
+        texture.height = height;
+        cached.textures.push_back(std::move(texture));
+    }
+    if (cache.peek() != std::char_traits<char>::eof()) return false;
+    out = std::move(cached);
+    return true;
+}
+
+bool SaveWadCache(const fs::path& cachePath, const std::string& sourceKey,
+                  std::uint64_t sourceSize, const WadContentHash& sourceHash, const WadArchive& archive) {
+    std::error_code ec;
+    fs::create_directories(cachePath.parent_path(), ec);
+    if (ec) {
+        std::cerr << "MatEdit: cannot create WAD cache directory '" << cachePath.parent_path().string()
+                  << "': " << ec.message() << std::endl;
+        return false;
+    }
+
+    const fs::path temporaryPath = cachePath.string() + ".tmp";
+    std::ofstream cache(temporaryPath, std::ios::binary | std::ios::trunc);
+    if (!cache) {
+        std::cerr << "MatEdit: cannot write WAD cache '" << temporaryPath.string() << "'" << std::endl;
+        return false;
+    }
+    const std::array<char, 8> magic{'M', 'A', 'T', 'W', 'A', 'D', '0', '1'};
+    const std::uint32_t version = 1;
+    const std::uint32_t pathLength = static_cast<std::uint32_t>(sourceKey.size());
+    const std::uint32_t textureCount = static_cast<std::uint32_t>(archive.textures.size());
+    cache.write(magic.data(), static_cast<std::streamsize>(magic.size()));
+    bool valid = WriteWadCacheValue(cache, version) &&
+                 WriteWadCacheValue(cache, pathLength);
+    if (valid) cache.write(sourceKey.data(), static_cast<std::streamsize>(sourceKey.size()));
+    valid = valid && WriteWadCacheValue(cache, sourceSize) &&
+            WriteWadCacheValue(cache, sourceHash.first) &&
+            WriteWadCacheValue(cache, sourceHash.second) &&
+            WriteWadCacheValue(cache, textureCount);
+    for (const WadTexture& texture : archive.textures) {
+        if (texture.name.empty() || texture.name.size() > 16) {
+            valid = false;
+            break;
+        }
+        const auto nameLength = static_cast<std::uint8_t>(texture.name.size());
+        const auto width = static_cast<std::int32_t>(texture.width);
+        const auto height = static_cast<std::int32_t>(texture.height);
+        valid = WriteWadCacheValue(cache, nameLength);
+        if (valid) cache.write(texture.name.data(), static_cast<std::streamsize>(texture.name.size()));
+        valid = valid && WriteWadCacheValue(cache, width) && WriteWadCacheValue(cache, height) &&
+                WriteWadCacheValue(cache, texture.pixelOffset) && WriteWadCacheValue(cache, texture.paletteOffset);
+        if (!valid) break;
+    }
+    cache.close();
+    if (!valid || !cache) {
+        std::cerr << "MatEdit: failed writing WAD cache '" << temporaryPath.string() << "'" << std::endl;
+        fs::remove(temporaryPath, ec);
+        return false;
+    }
+#ifdef _WIN32
+    if (!MoveFileExW(temporaryPath.c_str(), cachePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::cerr << "MatEdit: cannot replace WAD cache '" << cachePath.string()
+                  << "' (Windows error " << GetLastError() << ")" << std::endl;
+        fs::remove(temporaryPath, ec);
+        return false;
+    }
+#else
+    fs::rename(temporaryPath, cachePath, ec);
+    if (ec) {
+        std::cerr << "MatEdit: cannot replace WAD cache '" << cachePath.string() << "': " << ec.message() << std::endl;
+        fs::remove(temporaryPath, ec);
+        return false;
+    }
+#endif
+    return true;
+}
+
+fs::path ResolveWadPath(const std::string& relativePath) {
     fs::path fullPath = fs::path(relativePath).is_absolute() ? fs::path(relativePath) : gameRootPath / relativePath;
+    std::error_code ec;
+    fs::path canonicalPath = fs::weakly_canonical(fullPath, ec);
+    if (!ec) return canonicalPath;
+    ec.clear();
+    fs::path absolutePath = fs::absolute(fullPath, ec);
+    return ec ? fullPath.lexically_normal() : absolutePath.lexically_normal();
+}
+
+bool ParseWadArchive(const std::string& relativePath, const fs::path& fullPath,
+                     std::uint64_t sourceSize, WadArchive& out) {
     std::ifstream file(fullPath, std::ios::binary);
     if (!file) return false;
 
@@ -724,6 +1208,8 @@ bool ReadWadArchive(const std::string& relativePath, WadArchive& out) {
     file.read(reinterpret_cast<char*>(&header), sizeof(header));
     if (!file || (std::strncmp(header.identification, "WAD2", 4) != 0 && std::strncmp(header.identification, "WAD3", 4) != 0)) return false;
     if (header.numLumps < 0 || header.numLumps > 1000000 || header.infoTableOffset < 0) return false;
+    if (static_cast<std::uint64_t>(header.infoTableOffset) +
+        static_cast<std::uint64_t>(header.numLumps) * sizeof(WadLumpRaw) > sourceSize) return false;
 
     file.seekg(header.infoTableOffset, std::ios::beg);
     if (!file) return false;
@@ -738,6 +1224,7 @@ bool ReadWadArchive(const std::string& relativePath, WadArchive& out) {
         if (!file) return false;
         if (lump.type != 0x43 || lump.compression != 0) continue;
         if (lump.filePos < 0 || lump.diskSize < 40 || lump.diskSize > 256 * 1024 * 1024) continue;
+        if (static_cast<std::uint64_t>(lump.filePos) + static_cast<std::uint64_t>(lump.diskSize) > sourceSize) continue;
 
         const auto directoryReturn = file.tellg();
         file.seekg(lump.filePos, std::ios::beg);
@@ -778,7 +1265,11 @@ bool ReadWadArchive(const std::string& relativePath, WadArchive& out) {
         const std::streamoff lumpStart = static_cast<std::streamoff>(lump.filePos);
         const std::streamoff pixelOffset = lumpStart + static_cast<std::streamoff>(offsets[0]);
         const std::streamoff paletteOffset = lumpStart + static_cast<std::streamoff>(offsets[3]) + static_cast<std::streamoff>((width / 8) * (height / 8));
-        if (pixelOffset < 0 || paletteOffset < 0 || pixelOffset + static_cast<std::streamoff>(pixelCount) > lumpStart + lump.diskSize) {
+        if (pixelOffset < 0 || paletteOffset < 0 ||
+            pixelOffset + static_cast<std::streamoff>(pixelCount) > lumpStart + lump.diskSize ||
+            paletteOffset + 770 > lumpStart + lump.diskSize ||
+            static_cast<std::uint64_t>(pixelOffset) > std::numeric_limits<std::uint32_t>::max() ||
+            static_cast<std::uint64_t>(paletteOffset) > std::numeric_limits<std::uint32_t>::max()) {
             file.clear();
             file.seekg(directoryReturn);
             continue;
@@ -791,6 +1282,115 @@ bool ReadWadArchive(const std::string& relativePath, WadArchive& out) {
         file.seekg(directoryReturn);
     }
     return true;
+}
+
+bool ReadWadArchive(const std::string& relativePath, WadArchive& out) {
+    const fs::path fullPath = ResolveWadPath(relativePath);
+    std::uint64_t sourceSize = 0;
+    WadContentHash sourceHash;
+    if (!GetWadFingerprint(fullPath, sourceSize, sourceHash)) return false;
+
+    std::error_code pathError;
+    const std::string sourceKey = fs::weakly_canonical(fullPath, pathError).generic_string();
+    const std::string cacheKey = pathError ? fullPath.generic_string() : sourceKey;
+    const fs::path cachePath = GetWadCachePath(cacheKey);
+
+    out = {};
+    out.relativePath = relativePath;
+    out.displayName = fullPath.filename().string();
+    if (!LoadWadCache(cachePath, cacheKey, sourceSize, sourceHash, out)) {
+        if (!ParseWadArchive(relativePath, fullPath, sourceSize, out)) return false;
+        SaveWadCache(cachePath, cacheKey, sourceSize, sourceHash, out);
+    }
+    out.sourceSize = sourceSize;
+    out.contentHashFirst = sourceHash.first;
+    out.contentHashSecond = sourceHash.second;
+    return true;
+}
+
+std::shared_ptr<const std::vector<std::uint8_t>> LoadWadSourceData(const WadArchive& archive) {
+    const fs::path path = ResolveWadPath(archive.relativePath);
+    const std::string key = path.generic_string();
+    auto cached = g_wadFileCache.find(key);
+    if (cached != g_wadFileCache.end()) {
+        if (cached->second.sourceSize == archive.sourceSize &&
+            cached->second.hashFirst == archive.contentHashFirst &&
+            cached->second.hashSecond == archive.contentHashSecond) {
+            cached->second.lastUse = ++g_wadCacheClock;
+            return cached->second.data;
+        }
+        g_wadFileCacheBytes -= cached->second.data->size();
+        g_wadFileCache.erase(cached);
+    }
+
+    if (archive.sourceSize > std::numeric_limits<std::size_t>::max() ||
+        archive.sourceSize > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max())) return {};
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return {};
+    const std::streamoff end = file.tellg();
+    if (end < 0 || static_cast<std::uint64_t>(end) != archive.sourceSize) return {};
+    file.seekg(0, std::ios::beg);
+
+    auto data = std::make_shared<std::vector<std::uint8_t>>(static_cast<std::size_t>(archive.sourceSize));
+    file.read(reinterpret_cast<char*>(data->data()), static_cast<std::streamsize>(data->size()));
+    if (!file || static_cast<std::size_t>(file.gcount()) != data->size()) return {};
+    WadContentHash hash;
+    UpdateWadHash(hash, reinterpret_cast<const char*>(data->data()), data->size());
+    if (hash.first != archive.contentHashFirst || hash.second != archive.contentHashSecond) {
+        std::cerr << "MatEdit: WAD file changed after it was indexed; reload WADs: " << path.string() << std::endl;
+        return {};
+    }
+
+    if (data->size() > kWadFileCacheLimit) return data;
+    while (g_wadFileCacheBytes + data->size() > kWadFileCacheLimit) {
+        auto oldest = g_wadFileCache.end();
+        for (auto it = g_wadFileCache.begin(); it != g_wadFileCache.end(); ++it) {
+            if (it->second.data.use_count() != 1) continue;
+            if (oldest == g_wadFileCache.end() || it->second.lastUse < oldest->second.lastUse) oldest = it;
+        }
+        if (oldest == g_wadFileCache.end()) return data;
+        g_wadFileCacheBytes -= oldest->second.data->size();
+        g_wadFileCache.erase(oldest);
+    }
+
+    g_wadFileCacheBytes += data->size();
+    g_wadFileCache.emplace(key, CachedWadFile{
+        data, archive.sourceSize, archive.contentHashFirst, archive.contentHashSecond, ++g_wadCacheClock
+    });
+    return data;
+}
+
+bool ReadWadTextureBytes(const WadArchive& archive, const WadTexture& texture,
+                         std::vector<std::uint8_t>& indices,
+                         std::array<std::uint8_t, 256 * 3>& palette) {
+    const std::size_t pixelCount = static_cast<std::size_t>(texture.width) * static_cast<std::size_t>(texture.height);
+    if (static_cast<std::uint64_t>(texture.pixelOffset) + pixelCount > archive.sourceSize ||
+        static_cast<std::uint64_t>(texture.paletteOffset) + 770u > archive.sourceSize) return false;
+    indices.resize(pixelCount);
+
+    if (archive.sourceSize <= kWadFileCacheLimit) {
+        const std::shared_ptr<const std::vector<std::uint8_t>> wadData = LoadWadSourceData(archive);
+        if (!wadData) return false;
+        std::memcpy(indices.data(), wadData->data() + texture.pixelOffset, indices.size());
+        std::uint16_t paletteCount = 0;
+        std::memcpy(&paletteCount, wadData->data() + texture.paletteOffset, sizeof(paletteCount));
+        if (paletteCount < 256) return false;
+        std::memcpy(palette.data(), wadData->data() + texture.paletteOffset + sizeof(paletteCount), palette.size());
+        return true;
+    }
+
+    const fs::path path = ResolveWadPath(archive.relativePath);
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    file.seekg(static_cast<std::streamoff>(texture.pixelOffset), std::ios::beg);
+    file.read(reinterpret_cast<char*>(indices.data()), static_cast<std::streamsize>(indices.size()));
+    if (!file) return false;
+    file.seekg(static_cast<std::streamoff>(texture.paletteOffset), std::ios::beg);
+    std::uint16_t paletteCount = 0;
+    file.read(reinterpret_cast<char*>(&paletteCount), sizeof(paletteCount));
+    if (!file || paletteCount < 256) return false;
+    file.read(reinterpret_cast<char*>(palette.data()), static_cast<std::streamsize>(palette.size()));
+    return static_cast<bool>(file);
 }
 
 }
@@ -814,39 +1414,13 @@ TexturePreviewInfo LoadTexturePreview(const std::string& reference) {
         if (separator == std::string::npos) return info;
         const std::string wadPath = encoded.substr(0, separator);
         const std::string textureName = encoded.substr(separator + 1);
-        for (const auto& candidate : g_wadArchives) {
-            if (candidate.relativePath == wadPath) {
-                wad = &candidate;
-                break;
-            }
-        }
-        if (!wad) return info;
-        for (const auto& candidate : wad->textures) {
-            if (candidate.name == textureName) {
-                wadTexture = &candidate;
-                break;
-            }
-        }
-        if (!wadTexture || wadTexture->pixelOffset == 0 || wadTexture->paletteOffset == 0) return info;
-
-        const fs::path wadFilePath = fs::path(wadPath).is_absolute() ? fs::path(wadPath) : (gameRootPath / wadPath);
-        std::ifstream wadFile(wadFilePath, std::ios::binary);
-        if (!wadFile) return info;
+        if (!FindWadTexture(wadPath, textureName, wad, wadTexture) ||
+            wadTexture->pixelOffset == 0 || wadTexture->paletteOffset == 0) return info;
 
         const std::size_t pixelCount = static_cast<std::size_t>(wadTexture->width) * static_cast<std::size_t>(wadTexture->height);
-        std::vector<unsigned char> indices(pixelCount);
-        wadFile.seekg(static_cast<std::streamoff>(wadTexture->pixelOffset), std::ios::beg);
-        wadFile.read(reinterpret_cast<char*>(indices.data()), static_cast<std::streamsize>(indices.size()));
-        if (!wadFile) return info;
-
-        wadFile.seekg(static_cast<std::streamoff>(wadTexture->paletteOffset), std::ios::beg);
-        std::uint16_t paletteCount = 0;
-        wadFile.read(reinterpret_cast<char*>(&paletteCount), sizeof(paletteCount));
-        if (!wadFile || paletteCount < 256) return info;
-
-        std::array<unsigned char, 256 * 3> palette{};
-        wadFile.read(reinterpret_cast<char*>(palette.data()), static_cast<std::streamsize>(palette.size()));
-        if (!wadFile) return info;
+        std::vector<std::uint8_t> indices;
+        std::array<std::uint8_t, 256 * 3> palette{};
+        if (!ReadWadTextureBytes(*wad, *wadTexture, indices, palette)) return info;
 
         std::vector<unsigned char> rgba(pixelCount * 4u);
         for (std::size_t px = 0; px < pixelCount; ++px) {
@@ -859,10 +1433,9 @@ TexturePreviewInfo LoadTexturePreview(const std::string& reference) {
 
         glGenTextures(1, &info.texture);
         glBindTexture(GL_TEXTURE_2D, info.texture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        RegisterTextureSampling(info.texture, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, wadTexture->width, wadTexture->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
@@ -914,19 +1487,16 @@ std::string ResolveWadTextureReference(const std::string& reference) {
     if (extension == ".png" || extension == ".tga" || extension == ".dds") name = fs::path(name).stem().string();
     if (name.empty()) return {};
 
-    for (const auto& wad : g_wadArchives) {
-        for (const auto& texture : wad.textures) {
-            std::string textureName = texture.name;
-            const std::string textureExtension = ToLower(fs::path(textureName).extension().string());
-            if (textureExtension == ".png" || textureExtension == ".tga" || textureExtension == ".dds") textureName = fs::path(textureName).stem().string();
-            if (ToLower(textureName) != ToLower(name)) continue;
-            return MakeWadTextureReference(wad, texture);
-        }
-    }
-    return {};
+    const auto lookup = g_wadTextureNameLookup.find(ToLower(name));
+    if (lookup == g_wadTextureNameLookup.end() ||
+        lookup->second.first >= g_wadArchives.size()) return {};
+    const WadArchive& wad = g_wadArchives[lookup->second.first];
+    if (lookup->second.second >= wad.textures.size()) return {};
+    return MakeWadTextureReference(wad, wad.textures[lookup->second.second]);
 }
 
-GLuint LoadTextureReference(const std::string& reference) {
+GLuint LoadTextureReference(const std::string& reference, bool* goldSrcWadTransparency) {
+    if (goldSrcWadTransparency) *goldSrcWadTransparency = false;
     const fs::path referencePath(reference);
     const std::string extension = ToLower(referencePath.extension().string());
     if (extension == ".png" || extension == ".tga") return 0;
@@ -937,6 +1507,13 @@ GLuint LoadTextureReference(const std::string& reference) {
     const std::string wadReference = ResolveWadTextureReference(reference);
     if (!wadReference.empty()) {
         TexturePreviewInfo preview = LoadTexturePreview(wadReference);
+        if (preview.texture != 0 && goldSrcWadTransparency) {
+            const std::size_t separator = wadReference.rfind('#');
+            if (separator != std::string::npos) {
+                const std::string textureName = wadReference.substr(separator + 1);
+                *goldSrcWadTransparency = !textureName.empty() && textureName[0] == '{';
+            }
+        }
         const GLuint texture = preview.texture;
         preview.texture = 0;
         ReleaseTexturePreview(preview);
@@ -950,7 +1527,11 @@ GLuint LoadTextureReference(const std::string& reference) {
 void ReleaseTexturePreview(TexturePreviewInfo& preview) {
     if (preview.texture) {
         if (preview.cachedDDS) ReleaseDDSTexture(preview.texture);
-        else glDeleteTextures(1, &preview.texture);
+        else {
+            g_textureFormatInfo.erase(preview.texture);
+            g_textureMaxMipLevels.erase(preview.texture);
+            glDeleteTextures(1, &preview.texture);
+        }
     }
     preview = {};
 }
@@ -958,11 +1539,23 @@ void ReleaseTexturePreview(TexturePreviewInfo& preview) {
 const std::vector<WadArchive>& GetWadArchives() { return g_wadArchives; }
 
 bool AddWadArchive(const std::string& relativePath) {
-    const auto duplicate = std::find_if(g_wadArchives.begin(), g_wadArchives.end(), [&](const WadArchive& wad) { return wad.relativePath == relativePath; });
-    if (duplicate != g_wadArchives.end()) return true;
+    if (g_wadArchiveLookup.find(ToLower(relativePath)) != g_wadArchiveLookup.end()) return true;
     WadArchive wad;
     if (!ReadWadArchive(relativePath, wad)) return false;
     g_wadArchives.push_back(std::move(wad));
+    const std::size_t archiveIndex = g_wadArchives.size() - 1;
+    const WadArchive& loaded = g_wadArchives.back();
+    g_wadArchiveLookup.emplace(ToLower(loaded.relativePath), archiveIndex);
+    for (std::size_t textureIndex = 0; textureIndex < loaded.textures.size(); ++textureIndex) {
+        const WadTexture& texture = loaded.textures[textureIndex];
+        g_wadTextureLookup.emplace(MakeWadTextureLookupKey(loaded.relativePath, texture.name),
+                                   std::make_pair(archiveIndex, textureIndex));
+        g_wadTextureNameLookup.try_emplace(ToLower(texture.name), archiveIndex, textureIndex);
+        const std::string extension = ToLower(fs::path(texture.name).extension().string());
+        if (extension == ".png" || extension == ".tga" || extension == ".dds") {
+            g_wadTextureNameLookup.try_emplace(ToLower(fs::path(texture.name).stem().string()), archiveIndex, textureIndex);
+        }
+    }
     return true;
 }
 
@@ -985,7 +1578,12 @@ void ScanAndLoadAllWads() {
     }
 }
 
-void ClearWadArchives() { g_wadArchives.clear(); }
+void ClearWadArchives() {
+    g_wadArchives.clear();
+    g_wadArchiveLookup.clear();
+    g_wadTextureLookup.clear();
+    g_wadTextureNameLookup.clear();
+}
 
 std::vector<std::string> GetLoadedWadPaths() {
     std::vector<std::string> paths;
@@ -1077,6 +1675,7 @@ void BuildLuma(const TexturePixels& source, std::vector<std::uint8_t>& luma) {
 
 void BuildHeight(const TexturePixels& source, int channel, bool invert, std::vector<std::uint8_t>& height) {
     const std::size_t count = static_cast<std::size_t>(source.width) * static_cast<std::size_t>(source.height);
+    channel = std::clamp(channel, 0, 4);
     height.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
         float value = 0.0f;
@@ -1090,6 +1689,43 @@ void BuildHeight(const TexturePixels& source, int channel, bool invert, std::vec
         }
         if (invert) value = 1.0f - value;
         height[i] = static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+    }
+}
+
+void ApplyHeightRange(std::vector<std::uint8_t>& height, float blackPoint, float whitePoint, float gamma = 1.0f) {
+    const float black = std::clamp(blackPoint, 0.0f, 0.9999f);
+    const float white = std::clamp(whitePoint, black + 0.0001f, 1.0f);
+    const float inverseRange = 1.0f / (white - black);
+    const float safeGamma = std::clamp(gamma, 0.1f, 4.0f);
+    for (std::uint8_t& value : height) {
+        float adjusted = std::clamp((value / 255.0f - black) * inverseRange, 0.0f, 1.0f);
+        adjusted = std::pow(adjusted, safeGamma);
+        value = static_cast<std::uint8_t>(adjusted * 255.0f + 0.5f);
+    }
+}
+
+void SmoothHeight(std::vector<std::uint8_t>& height, int width, int heightPixels, float amount, bool tileEdges) {
+    const float blend = std::clamp(amount, 0.0f, 1.0f);
+    if (blend <= 0.0f || width <= 0 || heightPixels <= 0) return;
+    const std::vector<std::uint8_t> source = height;
+    auto sample = [&](int x, int y) -> float {
+        if (tileEdges) {
+            x = (x % width + width) % width;
+            y = (y % heightPixels + heightPixels) % heightPixels;
+        } else {
+            x = std::clamp(x, 0, width - 1);
+            y = std::clamp(y, 0, heightPixels - 1);
+        }
+        return source[static_cast<std::size_t>(y) * width + x];
+    };
+    for (int y = 0; y < heightPixels; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const float blur = (sample(x - 1, y - 1) + 2.0f * sample(x, y - 1) + sample(x + 1, y - 1) +
+                                2.0f * sample(x - 1, y) + 4.0f * sample(x, y) + 2.0f * sample(x + 1, y) +
+                                sample(x - 1, y + 1) + 2.0f * sample(x, y + 1) + sample(x + 1, y + 1)) / 16.0f;
+            const std::size_t index = static_cast<std::size_t>(y) * width + x;
+            height[index] = static_cast<std::uint8_t>(std::clamp(source[index] * (1.0f - blend) + blur * blend, 0.0f, 255.0f) + 0.5f);
+        }
     }
 }
 
@@ -1141,10 +1777,9 @@ TexturePreviewInfo UploadCreatorPreviewRGBA(const std::vector<std::uint8_t>& rgb
     while (glGetError() != GL_NO_ERROR) {}
     glGenTextures(1, &preview.texture);
     glBindTexture(GL_TEXTURE_2D, preview.texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, mipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    RegisterTextureSampling(preview.texture, mipmaps ? GetFullMipLevel(width, height) : 0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     if (mipmaps) glGenerateMipmap(GL_TEXTURE_2D);
@@ -1152,6 +1787,7 @@ TexturePreviewInfo UploadCreatorPreviewRGBA(const std::vector<std::uint8_t>& rgb
     glBindTexture(GL_TEXTURE_2D, 0);
 
     if (glGetError() != GL_NO_ERROR) {
+        g_textureMaxMipLevels.erase(preview.texture);
         glDeleteTextures(1, &preview.texture);
         return {};
     }
@@ -1233,104 +1869,142 @@ void ApplyCreatorSharpness(TexturePixels& pixels, float sharpness) {
     }
 }
 
-TexturePreviewInfo GenerateNormalMapPreviewTextureImpl(const std::string& source, float strength, bool flipX, bool flipY, bool fullZRange, int heightChannel, bool invertHeight, float sharpness, bool mipmaps) {
-    TexturePixels pixels;
-    if (!LoadTexturePixels(source, pixels) || pixels.width <= 0 || pixels.height <= 0) return {};
-    ApplyCreatorSharpness(pixels, sharpness);
-
-    std::vector<std::uint8_t> heightData;
-    BuildHeight(pixels, heightChannel, invertHeight, heightData);
-    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(pixels.width) * static_cast<std::size_t>(pixels.height) * 4u);
-    const float scale = std::max(0.0f, strength);
-
-    for (int y = 0; y < pixels.height; ++y) {
-        for (int x = 0; x < pixels.width; ++x) {
-            auto sample = [&](int sx, int sy) -> float {
-                sx = std::clamp(sx, 0, pixels.width - 1);
-                sy = std::clamp(sy, 0, pixels.height - 1);
-                return heightData[static_cast<std::size_t>(sy) * pixels.width + sx] / 255.0f;
-            };
-            const float dx = (sample(x + 1, y - 1) + 2.0f * sample(x + 1, y) + sample(x + 1, y + 1)) -
-                             (sample(x - 1, y - 1) + 2.0f * sample(x - 1, y) + sample(x - 1, y + 1));
-            const float dy = (sample(x - 1, y + 1) + 2.0f * sample(x, y + 1) + sample(x + 1, y + 1)) -
-                             (sample(x - 1, y - 1) + 2.0f * sample(x, y - 1) + sample(x + 1, y - 1));
+void BuildNormalRGBA(const std::vector<std::uint8_t>& height, int width, int heightPixels,
+                     const NormalMapSettings& settings, std::vector<std::uint8_t>& rgba) {
+    rgba.resize(height.size() * 4u);
+    const float scale = std::max(0.0f, settings.strength);
+    auto sample = [&](int x, int y) -> float {
+        if (settings.tileEdges) {
+            x = (x % width + width) % width;
+            y = (y % heightPixels + heightPixels) % heightPixels;
+        } else {
+            x = std::clamp(x, 0, width - 1);
+            y = std::clamp(y, 0, heightPixels - 1);
+        }
+        return height[static_cast<std::size_t>(y) * width + x] / 255.0f;
+    };
+    for (int y = 0; y < heightPixels; ++y) {
+        for (int x = 0; x < width; ++x) {
+            float dx = 0.0f;
+            float dy = 0.0f;
+            if (settings.gradientFilter == 1) {
+                dx = (sample(x + 1, y) - sample(x - 1, y)) * 4.0f;
+                dy = (sample(x, y + 1) - sample(x, y - 1)) * 4.0f;
+            } else if (settings.gradientFilter == 2) {
+                dx = 3.0f * (sample(x + 1, y - 1) - sample(x - 1, y - 1)) +
+                     10.0f * (sample(x + 1, y) - sample(x - 1, y)) +
+                     3.0f * (sample(x + 1, y + 1) - sample(x - 1, y + 1));
+                dy = 3.0f * (sample(x - 1, y + 1) - sample(x - 1, y - 1)) +
+                     10.0f * (sample(x, y + 1) - sample(x, y - 1)) +
+                     3.0f * (sample(x + 1, y + 1) - sample(x + 1, y - 1));
+                dx /= 16.0f;
+                dy /= 16.0f;
+            } else {
+                dx = (sample(x + 1, y - 1) + 2.0f * sample(x + 1, y) + sample(x + 1, y + 1)) -
+                     (sample(x - 1, y - 1) + 2.0f * sample(x - 1, y) + sample(x - 1, y + 1));
+                dy = (sample(x - 1, y + 1) + 2.0f * sample(x, y + 1) + sample(x + 1, y + 1)) -
+                     (sample(x - 1, y - 1) + 2.0f * sample(x, y - 1) + sample(x + 1, y - 1));
+            }
             float nx = -dx * scale;
             float ny = -dy * scale;
             float nz = 1.0f;
-            const float invLength = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
-            nx *= invLength;
-            ny *= invLength;
-            if (flipX) nx = -nx;
-            if (flipY) ny = -ny;
-            const std::size_t index = (static_cast<std::size_t>(y) * pixels.width + x) * 4u;
-            rgba[index + 0] = static_cast<std::uint8_t>(std::clamp(nx * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
-            rgba[index + 1] = static_cast<std::uint8_t>(std::clamp(ny * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
-            const float encodedZ = fullZRange ? nz : (nz * 0.5f + 0.5f);
-            rgba[index + 2] = static_cast<std::uint8_t>(std::clamp(encodedZ, 0.0f, 1.0f) * 255.0f + 0.5f);
-            rgba[index + 3] = 255;
+            const float inverseLength = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+            nx *= inverseLength;
+            ny *= inverseLength;
+            if (settings.flipX) nx = -nx;
+            if (settings.flipY) ny = -ny;
+            const std::size_t index = (static_cast<std::size_t>(y) * width + x) * 4u;
+            rgba[index + 0u] = static_cast<std::uint8_t>(std::clamp(nx * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
+            rgba[index + 1u] = static_cast<std::uint8_t>(std::clamp(ny * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
+            const float encodedZ = settings.fullZRange ? nz : (nz * 0.5f + 0.5f);
+            rgba[index + 2u] = static_cast<std::uint8_t>(std::clamp(encodedZ, 0.0f, 1.0f) * 255.0f + 0.5f);
+            rgba[index + 3u] = 255;
         }
     }
-
-    return UploadCreatorPreviewRGBA(rgba, pixels.width, pixels.height, mipmaps);
 }
 
-TexturePreviewInfo GenerateBumpMapPreviewTextureImpl(const std::string& source, int heightChannel, bool invert, float contrast, float brightness, bool normalize, float sharpness, bool mipmaps) {
+void BuildGlossPixels(const TexturePixels& pixels, const GlossMapSettings& settings, std::vector<std::uint8_t>& output) {
+    std::vector<std::uint8_t> luma;
+    BuildLuma(pixels, luma);
+    output.resize(luma.size());
+    const float contrast = std::max(0.0f, settings.contrast);
+    const float power = std::max(0.01f, settings.power);
+    const float lower = std::clamp(std::min(settings.lowerThreshold, settings.upperThreshold), 0.0f, 0.9999f);
+    const float upper = std::clamp(std::max(settings.lowerThreshold, settings.upperThreshold), lower + 0.0001f, 1.0f);
+    const float softness = std::clamp(settings.softness, 0.0f, 1.0f);
+
+    for (std::size_t i = 0; i < luma.size(); ++i) {
+        const float red = pixels.rgba[i * 4u + 0u] / 255.0f;
+        const float green = pixels.rgba[i * 4u + 1u] / 255.0f;
+        const float blue = pixels.rgba[i * 4u + 2u] / 255.0f;
+        const float luminance = luma[i] / 255.0f;
+        float sourceValue = 0.0f;
+        if (settings.sourceMode == 1) sourceValue = red;
+        else if (settings.sourceMode == 2) sourceValue = green;
+        else if (settings.sourceMode == 3) sourceValue = blue;
+        else if (settings.sourceMode == 4) sourceValue = pixels.rgba[i * 4u + 3u] / 255.0f;
+        else sourceValue = luminance;
+
+        float value = settings.normalize
+            ? std::clamp((sourceValue - lower) / (upper - lower), 0.0f, 1.0f)
+            : std::clamp(sourceValue, lower, upper);
+        const float smoothValue = value * value * (3.0f - 2.0f * value);
+        value = value * (1.0f - softness) + smoothValue * softness;
+        if (settings.invert) value = 1.0f - value;
+        value = std::clamp((value - 0.5f) * contrast + 0.5f + settings.brightness, 0.0f, 1.0f);
+        value = std::pow(value, power);
+        output[i] = static_cast<std::uint8_t>(value * 255.0f + 0.5f);
+    }
+}
+
+TexturePreviewInfo GenerateNormalMapPreviewTextureImpl(const std::string& source, const NormalMapSettings& settings) {
     TexturePixels pixels;
     if (!LoadTexturePixels(source, pixels) || pixels.width <= 0 || pixels.height <= 0) return {};
-    ApplyCreatorSharpness(pixels, sharpness);
-
+    ApplyCreatorSharpness(pixels, settings.sharpness);
     std::vector<std::uint8_t> height;
-    BuildHeight(pixels, heightChannel, invert, height);
-    ApplyBumpHeightSettings(height, contrast, brightness, normalize);
+    BuildHeight(pixels, settings.heightChannel, settings.invertHeight, height);
+    ApplyHeightRange(height, settings.blackPoint, settings.whitePoint);
+    SmoothHeight(height, pixels.width, pixels.height, settings.smoothing, settings.tileEdges);
+    std::vector<std::uint8_t> rgba;
+    BuildNormalRGBA(height, pixels.width, pixels.height, settings, rgba);
+    return UploadCreatorPreviewRGBA(rgba, pixels.width, pixels.height, settings.mipmaps);
+}
+
+TexturePreviewInfo GenerateBumpMapPreviewTextureImpl(const std::string& source, const BumpMapSettings& settings) {
+    TexturePixels pixels;
+    if (!LoadTexturePixels(source, pixels) || pixels.width <= 0 || pixels.height <= 0) return {};
+    ApplyCreatorSharpness(pixels, settings.sharpness);
+    std::vector<std::uint8_t> height;
+    BuildHeight(pixels, settings.heightChannel, settings.invert, height);
+    ApplyHeightRange(height, settings.blackPoint, settings.whitePoint, settings.gamma);
+    SmoothHeight(height, pixels.width, pixels.height, settings.smoothing, settings.tileEdges);
+    ApplyBumpHeightSettings(height, settings.contrast, settings.brightness, settings.normalize);
 
     std::vector<std::uint8_t> rgba(height.size() * 4u);
     for (std::size_t i = 0; i < height.size(); ++i) {
-        const std::uint8_t v = height[i];
-        rgba[i * 4u + 0u] = v;
-        rgba[i * 4u + 1u] = v;
-        rgba[i * 4u + 2u] = v;
+        const std::uint8_t value = height[i];
+        rgba[i * 4u + 0u] = value;
+        rgba[i * 4u + 1u] = value;
+        rgba[i * 4u + 2u] = value;
         rgba[i * 4u + 3u] = 255;
     }
-    return UploadCreatorPreviewRGBA(rgba, pixels.width, pixels.height, mipmaps);
+    return UploadCreatorPreviewRGBA(rgba, pixels.width, pixels.height, settings.mipmaps);
 }
 
-TexturePreviewInfo GenerateGlossMapPreviewTextureImpl(const std::string& source, float contrast, float brightness, float power, bool invert, int metric, float lowerThreshold, float upperThreshold, bool normalize, float sharpness, bool mipmaps) {
+TexturePreviewInfo GenerateGlossMapPreviewTextureImpl(const std::string& source, const GlossMapSettings& settings) {
     TexturePixels pixels;
     if (!LoadTexturePixels(source, pixels) || pixels.width <= 0 || pixels.height <= 0) return {};
-    ApplyCreatorSharpness(pixels, sharpness);
-
-    std::vector<std::uint8_t> luma;
-    BuildLuma(pixels, luma);
-    const float safeContrast = std::max(0.0f, contrast);
-    const float safePower = std::max(0.01f, power);
-    std::vector<std::uint8_t> rgba(luma.size() * 4u);
-
-    const float lower = std::clamp(std::min(lowerThreshold, upperThreshold), 0.0f, 1.0f);
-    const float upper = std::clamp(std::max(lowerThreshold, upperThreshold), 0.0f, 1.0f);
-    for (std::size_t i = 0; i < luma.size(); ++i) {
-        const float r = pixels.rgba[i * 4u + 0u] / 255.0f;
-        const float g = pixels.rgba[i * 4u + 1u] / 255.0f;
-        const float b = pixels.rgba[i * 4u + 2u] / 255.0f;
-        const float y = luma[i] / 255.0f;
-        const float dr = std::fabs(r - y);
-        const float dg = std::fabs(g - y);
-        const float db = std::fabs(b - y);
-        float distance = metric == 0 ? (dr + dg + db) / 3.0f : (metric == 1 ? std::max({dr, dg, db}) : std::sqrt(dr * dr + dg * dg + db * db));
-        if (normalize) distance = std::clamp((distance - lower) / std::max(0.0001f, upper - lower), 0.0f, 1.0f);
-        else distance = std::clamp(distance, lower, upper);
-        float value = normalize ? distance : (upper > lower ? (distance - lower) / (upper - lower) : 0.0f);
-        if (invert) value = 1.0f - value;
-        value = (value - 0.5f) * safeContrast + 0.5f + brightness;
-        value = std::clamp(value, 0.0f, 1.0f);
-        value = std::pow(value, safePower);
-        const std::uint8_t v = static_cast<std::uint8_t>(value * 255.0f + 0.5f);
-        rgba[i * 4u + 0u] = v;
-        rgba[i * 4u + 1u] = v;
-        rgba[i * 4u + 2u] = v;
+    ApplyCreatorSharpness(pixels, settings.sharpness);
+    std::vector<std::uint8_t> gloss;
+    BuildGlossPixels(pixels, settings, gloss);
+    std::vector<std::uint8_t> rgba(gloss.size() * 4u);
+    for (std::size_t i = 0; i < gloss.size(); ++i) {
+        rgba[i * 4u + 0u] = gloss[i];
+        rgba[i * 4u + 1u] = gloss[i];
+        rgba[i * 4u + 2u] = gloss[i];
         rgba[i * 4u + 3u] = 255;
     }
-
-    return UploadCreatorPreviewRGBA(rgba, pixels.width, pixels.height, mipmaps);
+    return UploadCreatorPreviewRGBA(rgba, pixels.width, pixels.height, settings.mipmaps);
 }
 
 void EncodeBC4Block(const std::uint8_t* values, int stride, std::uint8_t out[8]) {
@@ -1465,36 +2139,12 @@ bool LoadWadPixels(const std::string& reference, TexturePixels& pixels) {
     const std::string wadPath = encoded.substr(0, separator);
     const std::string textureName = encoded.substr(separator + 1);
     const WadArchive* wad = nullptr;
-    for (const auto& candidate : g_wadArchives) {
-        if (ToLower(candidate.relativePath) == ToLower(wadPath)) {
-            wad = &candidate;
-            break;
-        }
-    }
-    if (!wad) return false;
     const WadTexture* texture = nullptr;
-    for (const auto& candidate : wad->textures) {
-        if (ToLower(candidate.name) == ToLower(textureName)) {
-            texture = &candidate;
-            break;
-        }
-    }
-    if (!texture) return false;
-    const fs::path path = fs::path(wadPath).is_absolute() ? fs::path(wadPath) : gameRootPath / wadPath;
-    std::ifstream file(path, std::ios::binary);
-    if (!file) return false;
+    if (!FindWadTexture(wadPath, textureName, wad, texture)) return false;
     const std::size_t count = static_cast<std::size_t>(texture->width) * static_cast<std::size_t>(texture->height);
-    std::vector<std::uint8_t> indices(count);
-    file.seekg(static_cast<std::streamoff>(texture->pixelOffset));
-    file.read(reinterpret_cast<char*>(indices.data()), static_cast<std::streamsize>(indices.size()));
-    if (!file) return false;
-    file.seekg(static_cast<std::streamoff>(texture->paletteOffset));
-    std::uint16_t paletteCount = 0;
-    file.read(reinterpret_cast<char*>(&paletteCount), sizeof(paletteCount));
-    if (!file || paletteCount < 256) return false;
+    std::vector<std::uint8_t> indices;
     std::array<std::uint8_t, 256 * 3> palette{};
-    file.read(reinterpret_cast<char*>(palette.data()), static_cast<std::streamsize>(palette.size()));
-    if (!file) return false;
+    if (!ReadWadTextureBytes(*wad, *texture, indices, palette)) return false;
 
     pixels.width = texture->width;
     pixels.height = texture->height;
@@ -1510,16 +2160,16 @@ bool LoadWadPixels(const std::string& reference, TexturePixels& pixels) {
 }
 }
 
-TexturePreviewInfo GenerateNormalMapPreviewTexture(const std::string& source, float strength, bool flipX, bool flipY, bool fullZRange, int heightChannel, bool invertHeight, float sharpness, bool mipmaps) {
-    return GenerateNormalMapPreviewTextureImpl(source, strength, flipX, flipY, fullZRange, heightChannel, invertHeight, sharpness, mipmaps);
+TexturePreviewInfo GenerateNormalMapPreviewTexture(const std::string& source, const NormalMapSettings& settings) {
+    return GenerateNormalMapPreviewTextureImpl(source, settings);
 }
 
-TexturePreviewInfo GenerateGlossMapPreviewTexture(const std::string& source, float contrast, float brightness, float power, bool invert, int metric, float lowerThreshold, float upperThreshold, bool normalize, float sharpness, bool mipmaps) {
-    return GenerateGlossMapPreviewTextureImpl(source, contrast, brightness, power, invert, metric, lowerThreshold, upperThreshold, normalize, sharpness, mipmaps);
+TexturePreviewInfo GenerateGlossMapPreviewTexture(const std::string& source, const GlossMapSettings& settings) {
+    return GenerateGlossMapPreviewTextureImpl(source, settings);
 }
 
-TexturePreviewInfo GenerateBumpMapPreviewTexture(const std::string& source, int heightChannel, bool invert, float contrast, float brightness, bool normalize, float sharpness, bool mipmaps) {
-    return GenerateBumpMapPreviewTextureImpl(source, heightChannel, invert, contrast, brightness, normalize, sharpness, mipmaps);
+TexturePreviewInfo GenerateBumpMapPreviewTexture(const std::string& source, const BumpMapSettings& settings) {
+    return GenerateBumpMapPreviewTextureImpl(source, settings);
 }
 
 bool LoadTexturePixels(const std::string& reference, TexturePixels& pixels) {
@@ -1566,53 +2216,27 @@ bool LoadTexturePixels(const std::string& reference, TexturePixels& pixels) {
     return pixels.width > 0 && pixels.height > 0 && !pixels.rgba.empty() && glGetError() == GL_NO_ERROR;
 }
 
-bool GenerateNormalMapDDS(const std::string& source, const std::string& outputPath, float strength, bool flipX, bool flipY, bool fullZRange, int heightChannel, bool invertHeight, float sharpness, bool mipmaps, int format) {
+bool GenerateNormalMapDDS(const std::string& source, const std::string& outputPath, const NormalMapSettings& settings, int format) {
     TexturePixels pixels;
     if (!LoadTexturePixels(source, pixels) || pixels.width <= 0 || pixels.height <= 0) return false;
-    ApplyCreatorSharpness(pixels, sharpness);
+    ApplyCreatorSharpness(pixels, settings.sharpness);
     std::vector<std::uint8_t> height;
-    BuildHeight(pixels, heightChannel, invertHeight, height);
+    BuildHeight(pixels, settings.heightChannel, settings.invertHeight, height);
+    ApplyHeightRange(height, settings.blackPoint, settings.whitePoint);
+    SmoothHeight(height, pixels.width, pixels.height, settings.smoothing, settings.tileEdges);
     std::vector<std::vector<std::uint8_t>> mipData;
     std::vector<std::vector<std::uint8_t>> rgbaMips;
     std::vector<std::pair<int, int>> sizes;
     int width = pixels.width;
     int heightSize = pixels.height;
     std::vector<std::uint8_t> currentHeight = std::move(height);
-    const float scale = std::max(0.0f, strength);
-
     while (true) {
         std::vector<std::uint8_t> normalX(static_cast<std::size_t>(width) * static_cast<std::size_t>(heightSize));
-        std::vector<std::uint8_t> normalY(normalX.size());
         std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width) * static_cast<std::size_t>(heightSize) * 4u);
-        for (int y = 0; y < heightSize; ++y) {
-            for (int x = 0; x < width; ++x) {
-                auto sample = [&](int sx, int sy) -> float {
-                    sx = std::clamp(sx, 0, width - 1);
-                    sy = std::clamp(sy, 0, heightSize - 1);
-                    return currentHeight[static_cast<std::size_t>(sy) * width + sx] / 255.0f;
-                };
-                const float dx = (sample(x + 1, y - 1) + 2.0f * sample(x + 1, y) + sample(x + 1, y + 1)) - (sample(x - 1, y - 1) + 2.0f * sample(x - 1, y) + sample(x - 1, y + 1));
-                const float dy = (sample(x - 1, y + 1) + 2.0f * sample(x, y + 1) + sample(x + 1, y + 1)) - (sample(x - 1, y - 1) + 2.0f * sample(x, y - 1) + sample(x + 1, y - 1));
-                float nx = -dx * scale;
-                float ny = -dy * scale;
-                float nz = 1.0f;
-                const float invLength = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
-                nx *= invLength;
-                ny *= invLength;
-                if (flipX) nx = -nx;
-                if (flipY) ny = -ny;
-                const std::size_t index = static_cast<std::size_t>(y) * width + x;
-                const std::uint8_t r = static_cast<std::uint8_t>(std::clamp(nx * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
-                const std::uint8_t g = static_cast<std::uint8_t>(std::clamp(ny * 0.5f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
-                const std::uint8_t b = static_cast<std::uint8_t>(std::clamp(fullZRange ? nz : (nz * 0.5f + 0.5f), 0.0f, 1.0f) * 255.0f + 0.5f);
-                normalX[index] = r;
-                normalY[index] = g;
-                rgba[index * 4u + 0u] = r;
-                rgba[index * 4u + 1u] = g;
-                rgba[index * 4u + 2u] = b;
-                rgba[index * 4u + 3u] = 255;
-            }
-        }
+        BuildNormalRGBA(currentHeight, width, heightSize, settings, rgba);
+        for (std::size_t i = 0; i < normalX.size(); ++i) normalX[i] = rgba[i * 4u];
+        std::vector<std::uint8_t> normalY(normalX.size());
+        for (std::size_t i = 0; i < normalY.size(); ++i) normalY[i] = rgba[i * 4u + 1u];
         if (format == 1) {
             std::vector<std::uint8_t> blocks;
             EncodeBC5(normalX, normalY, width, heightSize, blocks);
@@ -1621,7 +2245,7 @@ bool GenerateNormalMapDDS(const std::string& source, const std::string& outputPa
             rgbaMips.push_back(std::move(rgba));
         }
         sizes.emplace_back(width, heightSize);
-        if (!mipmaps || (width == 1 && heightSize == 1)) break;
+        if (!settings.mipmaps || (width == 1 && heightSize == 1)) break;
         std::vector<std::uint8_t> nextHeight;
         int nextWidth = 1;
         int nextHeightSize = 1;
@@ -1641,33 +2265,12 @@ bool GenerateNormalMapDDS(const std::string& source, const std::string& outputPa
     return WriteDDS(outputPath, pixels.width, pixels.height, mipData, format == 2 ? DXGI_FORMAT_BC7_UNORM : DXGI_FORMAT_BC5_UNORM, 16, format == 1 ? FourCC('A', 'T', 'I', '2') : 0u);
 }
 
-bool GenerateGlossMapDDS(const std::string& source, const std::string& outputPath, float contrast, float brightness, float power, bool invert, int metric, float lowerThreshold, float upperThreshold, bool normalize, float sharpness, bool mipmaps, int format) {
+bool GenerateGlossMapDDS(const std::string& source, const std::string& outputPath, const GlossMapSettings& settings, int format) {
     TexturePixels pixels;
     if (!LoadTexturePixels(source, pixels) || pixels.width <= 0 || pixels.height <= 0) return false;
-    ApplyCreatorSharpness(pixels, sharpness);
-    std::vector<std::uint8_t> luma;
-    BuildLuma(pixels, luma);
-    const float safeContrast = std::max(0.0f, contrast);
-    const float safePower = std::max(0.01f, power);
-    const float lower = std::clamp(std::min(lowerThreshold, upperThreshold), 0.0f, 1.0f);
-    const float upper = std::clamp(std::max(lowerThreshold, upperThreshold), 0.0f, 1.0f);
+    ApplyCreatorSharpness(pixels, settings.sharpness);
     std::vector<std::uint8_t> current;
-    current.resize(luma.size());
-    for (std::size_t i = 0; i < luma.size(); ++i) {
-        const float r = pixels.rgba[i * 4u + 0u] / 255.0f;
-        const float g = pixels.rgba[i * 4u + 1u] / 255.0f;
-        const float b = pixels.rgba[i * 4u + 2u] / 255.0f;
-        const float y = luma[i] / 255.0f;
-        const float dr = std::fabs(r - y);
-        const float dg = std::fabs(g - y);
-        const float db = std::fabs(b - y);
-        float distance = metric == 0 ? (dr + dg + db) / 3.0f : (metric == 1 ? std::max({dr, dg, db}) : std::sqrt(dr * dr + dg * dg + db * db));
-        float value = normalize ? std::clamp((distance - lower) / std::max(0.0001f, upper - lower), 0.0f, 1.0f) : std::clamp(distance, 0.0f, 1.0f);
-        if (invert) value = 1.0f - value;
-        value = std::clamp((value - 0.5f) * safeContrast + 0.5f + brightness, 0.0f, 1.0f);
-        value = std::pow(value, safePower);
-        current[i] = static_cast<std::uint8_t>(value * 255.0f + 0.5f);
-    }
+    BuildGlossPixels(pixels, settings, current);
 
     std::vector<std::vector<std::uint8_t>> mipData;
     std::vector<std::vector<std::uint8_t>> rgbaMips;
@@ -1692,7 +2295,7 @@ bool GenerateGlossMapDDS(const std::string& source, const std::string& outputPat
             return false;
         }
         sizes.emplace_back(width, height);
-        if (!mipmaps || (width == 1 && height == 1)) break;
+        if (!settings.mipmaps || (width == 1 && height == 1)) break;
         if (format == 2) {
             std::vector<std::uint8_t> next;
             int nextWidth = 1;
@@ -1721,14 +2324,16 @@ bool GenerateGlossMapDDS(const std::string& source, const std::string& outputPat
 }
 
 
-bool GenerateBumpMapDDS(const std::string& source, const std::string& outputPath, int heightChannel, bool invert, float contrast, float brightness, bool normalize, float sharpness, bool mipmaps, int format) {
+bool GenerateBumpMapDDS(const std::string& source, const std::string& outputPath, const BumpMapSettings& settings, int format) {
     TexturePixels pixels;
     if (!LoadTexturePixels(source, pixels) || pixels.width <= 0 || pixels.height <= 0) return false;
-    ApplyCreatorSharpness(pixels, sharpness);
+    ApplyCreatorSharpness(pixels, settings.sharpness);
 
     std::vector<std::uint8_t> current;
-    BuildHeight(pixels, heightChannel, invert, current);
-    ApplyBumpHeightSettings(current, contrast, brightness, normalize);
+    BuildHeight(pixels, settings.heightChannel, settings.invert, current);
+    ApplyHeightRange(current, settings.blackPoint, settings.whitePoint, settings.gamma);
+    SmoothHeight(current, pixels.width, pixels.height, settings.smoothing, settings.tileEdges);
+    ApplyBumpHeightSettings(current, settings.contrast, settings.brightness, settings.normalize);
 
     std::vector<std::vector<std::uint8_t>> mipData;
     std::vector<std::vector<std::uint8_t>> rgbaMips;
@@ -1753,7 +2358,7 @@ bool GenerateBumpMapDDS(const std::string& source, const std::string& outputPath
             return false;
         }
         sizes.emplace_back(width, height);
-        if (!mipmaps || (width == 1 && height == 1)) break;
+        if (!settings.mipmaps || (width == 1 && height == 1)) break;
         std::vector<std::uint8_t> next;
         int nextWidth = 1;
         int nextHeight = 1;

@@ -6,6 +6,43 @@ namespace {
 GLuint g_quadVAO = 0;
 GLuint g_quadVBO = 0;
 
+struct TAAUniformLocations {
+    GLuint program = 0;
+    GLint source = -1;
+    GLint history = -1;
+    GLint inverseResolution = -1;
+    GLint resetHistory = -1;
+};
+
+struct FXAAUniformLocations {
+    GLuint program = 0;
+    GLint source = -1;
+    GLint inverseResolution = -1;
+};
+
+TAAUniformLocations g_taaUniforms;
+FXAAUniformLocations g_fxaaUniforms;
+
+const TAAUniformLocations& GetTAAUniforms(GLuint program) {
+    if (g_taaUniforms.program != program) {
+        g_taaUniforms.program = program;
+        g_taaUniforms.source = glGetUniformLocation(program, "source");
+        g_taaUniforms.history = glGetUniformLocation(program, "history");
+        g_taaUniforms.inverseResolution = glGetUniformLocation(program, "inverseResolution");
+        g_taaUniforms.resetHistory = glGetUniformLocation(program, "resetHistory");
+    }
+    return g_taaUniforms;
+}
+
+const FXAAUniformLocations& GetFXAAUniforms(GLuint program) {
+    if (g_fxaaUniforms.program != program) {
+        g_fxaaUniforms.program = program;
+        g_fxaaUniforms.source = glGetUniformLocation(program, "source");
+        g_fxaaUniforms.inverseResolution = glGetUniformLocation(program, "inverseResolution");
+    }
+    return g_fxaaUniforms;
+}
+
 const char* kVertexShader = R"SHADER(
 #version 330 core
 out vec2 TexCoord;
@@ -36,9 +73,10 @@ vec3 SampleColor(vec2 uv) {
 }
 
 void main() {
-    vec3 current = SampleColor(TexCoord);
+    vec4 currentSample = texture(source, TexCoord);
+    vec3 current = currentSample.rgb;
     if (resetHistory != 0) {
-        FragColor = vec4(current, 1.0);
+        FragColor = currentSample;
         return;
     }
 
@@ -54,7 +92,7 @@ void main() {
 
     vec3 previous = texture(history, TexCoord).rgb;
     previous = clamp(previous, minimum, maximum);
-    FragColor = vec4(mix(current, previous, 0.82), 1.0);
+    FragColor = vec4(mix(current, previous, 0.82), currentSample.a);
 }
 )SHADER";
 
@@ -74,7 +112,8 @@ void main() {
     const float EDGE_THRESHOLD_MAX = 0.125;
     const float SUBPIXEL_QUALITY = 0.75;
 
-    vec3 rgbM = texture(source, TexCoord).rgb;
+    vec4 centerSample = texture(source, TexCoord);
+    vec3 rgbM = centerSample.rgb;
     vec3 rgbNW = texture(source, TexCoord + vec2(-1.0, -1.0) * inverseResolution).rgb;
     vec3 rgbNE = texture(source, TexCoord + vec2(1.0, -1.0) * inverseResolution).rgb;
     vec3 rgbSW = texture(source, TexCoord + vec2(-1.0, 1.0) * inverseResolution).rgb;
@@ -90,7 +129,7 @@ void main() {
     float lumaRange = lumaMax - lumaMin;
 
     if (lumaRange < max(EDGE_THRESHOLD_MIN, lumaMax * EDGE_THRESHOLD_MAX)) {
-        FragColor = vec4(rgbM, 1.0);
+        FragColor = centerSample;
         return;
     }
 
@@ -117,9 +156,9 @@ void main() {
 
     float lumaB = Luma(rgbB);
     if (lumaB < lumaMin || lumaB > lumaMax) {
-        FragColor = vec4(rgbA, 1.0);
+        FragColor = vec4(rgbA, centerSample.a);
     } else {
-        FragColor = vec4(rgbB, 1.0);
+        FragColor = vec4(rgbB, centerSample.a);
     }
 }
 )SHADER";
@@ -226,14 +265,15 @@ void RenderTAA(GLuint shader, GLuint sourceTexture, TAATarget& target, bool rese
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glUseProgram(shader);
+    const TAAUniformLocations& uniforms = GetTAAUniforms(shader);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, sourceTexture);
-    glUniform1i(glGetUniformLocation(shader, "source"), 0);
+    glUniform1i(uniforms.source, 0);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, target.history);
-    glUniform1i(glGetUniformLocation(shader, "history"), 1);
-    glUniform2f(glGetUniformLocation(shader, "inverseResolution"), 1.0f / target.width, 1.0f / target.height);
-    glUniform1i(glGetUniformLocation(shader, "resetHistory"), (resetHistory || !target.historyValid) ? 1 : 0);
+    glUniform1i(uniforms.history, 1);
+    glUniform2f(uniforms.inverseResolution, 1.0f / target.width, 1.0f / target.height);
+    glUniform1i(uniforms.resetHistory, (resetHistory || !target.historyValid) ? 1 : 0);
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
@@ -334,10 +374,11 @@ void RenderFXAA(GLuint shader, GLuint sourceTexture, FXAATarget& target) {
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
     glUseProgram(shader);
+    const FXAAUniformLocations& uniforms = GetFXAAUniforms(shader);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, sourceTexture);
-    glUniform1i(glGetUniformLocation(shader, "source"), 0);
-    glUniform2f(glGetUniformLocation(shader, "inverseResolution"), 1.0f / target.width, 1.0f / target.height);
+    glUniform1i(uniforms.source, 0);
+    glUniform2f(uniforms.inverseResolution, 1.0f / target.width, 1.0f / target.height);
     glBindVertexArray(g_quadVAO);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);

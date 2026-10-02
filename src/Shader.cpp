@@ -44,10 +44,12 @@ uniform samplerCube skybox;
 uniform int useSkybox;
 
 uniform int useDiffuse;
+uniform int useDiffuseAlpha;
 uniform int useNormal;
 uniform int normalMapMode;
 uniform int hasNormalMap;
 uniform int diffuseIsSRGB;
+uniform int glossIsSRGB;
 uniform int useGloss;
 uniform int useLuma;
 uniform int useBump;
@@ -171,36 +173,14 @@ vec3 ParallaxOcclusionMap(const vec2 texCoord, const vec3 viewVec) {
     return vec3(offsetBest, t);
 }
 
-float SmoothnessToRoughness(float value) {
-    return 1.0 - clamp(value, 0.0, 1.0);
-}
-
-float DistributionGGX(vec3 n, vec3 h, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float ndoth = max(dot(n, h), 0.0);
-    float ndoth2 = ndoth * ndoth;
-    float denom = ndoth2 * (a2 - 1.0) + 1.0;
-    return a2 / max(3.14159265 * denom * denom, 0.0001);
-}
-
-float GeometrySchlickGGX(float ndotv, float roughness) {
-    float r = roughness + 1.0;
-    float k = (r * r) / 8.0;
-    return ndotv / max(ndotv * (1.0 - k) + k, 0.0001);
-}
-
-float GeometrySmith(vec3 n, vec3 v, vec3 l, float roughness) {
-    return GeometrySchlickGGX(max(dot(n, v), 0.0), roughness) *
-           GeometrySchlickGGX(max(dot(n, l), 0.0), roughness);
-}
-
 vec3 FresnelSchlick(float cosTheta, vec3 f0) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
 vec3 SRGBToLinear(vec3 value) {
-    return pow(max(value, vec3(0.0)), vec3(2.2));
+    vec3 linearRGBLo = value / 12.92;
+    vec3 linearRGBHi = pow((value + 0.055) / 1.055, vec3(2.4));
+    return mix(linearRGBLo, linearRGBHi, greaterThan(value, vec3(0.04045)));
 }
 
 void main() {
@@ -237,7 +217,9 @@ void main() {
 
     vec3 baseColor = albedo;
     if (useDiffuse == 1) {
-        vec3 diffuseColor = texture(diffuseMap, sampledTexCoord).rgb;
+        vec4 diffuseSample = texture(diffuseMap, sampledTexCoord);
+        if (useDiffuseAlpha == 1 && diffuseSample.a < 0.25) discard;
+        vec3 diffuseColor = diffuseSample.rgb;
         baseColor = diffuseIsSRGB == 1 ? diffuseColor : SRGBToLinear(diffuseColor);
     }
 
@@ -266,49 +248,23 @@ void main() {
         N = normalize(TBN * tangentSurfaceNormal);
     }
 
-    float glossSmoothness = clamp(smoothness, 0.0, 1.0);
-    float metalness = 0.0;
-    float ambientOcclusion = 1.0;
-    float specularIntensity = 1.0;
+    float glossSpecularIntensity = clamp(smoothness, 0.0, 1.0);
 
     if (useGloss == 1) {
         vec4 glossData = texture(glossMap, sampledTexCoord);
-        glossSmoothness = clamp(glossData.r, 0.0, 1.0);
-
-        float glossChannelEpsilon = 0.02;
-        bool grayscaleGloss =
-            abs(glossData.r - glossData.g) < glossChannelEpsilon &&
-            abs(glossData.r - glossData.b) < glossChannelEpsilon;
-
-        if (grayscaleGloss) {
-            metalness = 0.0;
-            ambientOcclusion = 1.0;
-            specularIntensity = 1.0;
-        } else {
-            metalness = clamp(glossData.g, 0.0, 1.0);
-            ambientOcclusion = clamp(glossData.b, 0.0, 1.0);
-            specularIntensity = clamp(glossData.a, 0.0, 1.0);
-        }
+        vec3 glossColor = glossIsSRGB == 1 ? glossData.rgb : SRGBToLinear(glossData.rgb);
+        glossSpecularIntensity = clamp(glossColor.r, 0.0, 1.0);
     }
 
-    float roughness = max(0.045, SmoothnessToRoughness(glossSmoothness));
-    float NdotV = max(dot(N, V), 0.0);
     float NdotL = max(dot(N, L), 0.0);
     vec3 H = normalize(V + L);
 
-    vec3 F0 = mix(vec3(0.02), baseColor, metalness);
-    float NDF = DistributionGGX(N, H, roughness);
-    float G = GeometrySmith(N, V, L, roughness);
-    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
-    vec3 specular = (NDF * G * F / max(4.0 * NdotV * NdotL, 0.0001)) *
-                    (lightColor * lightIntensity) * specularIntensity * NdotL * shadowFactor;
+    float specular = pow(max(dot(N, H), 0.0), 32.0) * glossSpecularIntensity;
+    vec3 directSpecular = (lightColor * lightIntensity) * NdotL * specular * shadowFactor;
+    vec3 directDiffuse = baseColor * (lightColor * lightIntensity) * NdotL * shadowFactor;
 
-    vec3 kS = F;
-    vec3 kD = (vec3(1.0) - kS) * (1.0 - metalness);
-    vec3 directDiffuse = kD * baseColor * (lightColor * lightIntensity) * NdotL * shadowFactor;
-
-    vec3 ambient = baseColor * vec3(0.05) * ambientOcclusion;
-    vec3 lighting = ambient + directDiffuse + specular;
+    vec3 ambient = baseColor * vec3(0.05);
+    vec3 lighting = ambient + directDiffuse + directSpecular;
 
     if (useLuma == 1) {
         lighting += texture(lumaMap, sampledTexCoord).rgb;
@@ -321,8 +277,12 @@ void main() {
             reflectDir = vec3(-reflectDir.z, reflectDir.y, reflectDir.x);
         }
         vec3 reflected = texture(skybox, reflectDir).rgb;
-        float reflectAmount = max(reflectScale, 0.0) * max(glossSmoothness, 0.0);
-        reflection = reflected * F * reflectAmount;
+        float reflectionCosTheta = dot(V, N);
+        float reflectionFresnel = reflectionCosTheta >= 0.0
+            ? 0.02 + 0.98 * pow(clamp(1.0 - reflectionCosTheta, 0.0, 1.0), 5.0)
+            : 0.0;
+        float reflectAmount = max(reflectScale, 0.0) * glossSpecularIntensity;
+        reflection = reflected * reflectionFresnel * reflectAmount;
 
         float refractAmount = max(refractScale, 0.0);
         if (refractAmount > 0.0) {
@@ -391,6 +351,7 @@ GLuint LoadShader() {
     glDeleteShader(fragment);
     return program;
 }
+
 
 namespace {
 const char* kSkyboxVertexShader = R"SHADER(
@@ -461,4 +422,3 @@ GLuint LoadSkyboxShader() {
     glDeleteShader(fragment);
     return program;
 }
-

@@ -77,6 +77,7 @@ add_executable(MaterialEditor
     src/Skybox.cpp
     src/PostProcess.cpp
     src/Contributors.cpp
+    src/I18n.cpp
     src/main.cpp
 )
 
@@ -93,6 +94,10 @@ target_include_directories(MaterialEditor PRIVATE
     "${EXTERNAL_DIR}/glm"
     "${EXTERNAL_DIR}/gli"
     "${STB_INCLUDE_DIR}"
+)
+
+target_compile_definitions(MaterialEditor PRIVATE
+    MATEDIT_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/misc/fonts/Roboto-Medium.ttf"
 )
 
     target_link_libraries(MaterialEditor PRIVATE
@@ -158,4 +163,3 @@ add_custom_command(TARGET MaterialEditor POST_BUILD
         "${CMAKE_CURRENT_SOURCE_DIR}/CONTRIBUTORS.txt"
         "$<TARGET_FILE_DIR:MaterialEditor>/CONTRIBUTORS.txt"
 )
-

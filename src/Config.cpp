@@ -39,7 +39,14 @@ std::filesystem::path GetConfigReadPath() {
 }
 
 void ParseOptionalConfig(EditorConfig& cfg, const std::string& line) {
-    if (line.rfind("SHOW_FPS=", 0) == 0) cfg.showFps = line.substr(9) != "0";
+    if (line.rfind("LANGUAGE=", 0) == 0) {
+        const std::string language = line.substr(9);
+        if (language == "en" || language == "ru") cfg.language = language;
+    }
+    else if (line.rfind("SHOW_FPS=", 0) == 0) cfg.showFps = line.substr(9) != "0";
+    else if (line.rfind("VSYNC=", 0) == 0) cfg.vsyncEnabled = line.substr(6) != "0";
+    else if (line.rfind("TEXTURE_FILTERING=", 0) == 0) cfg.textureFilteringEnabled = line.substr(18) != "0";
+    else if (line.rfind("AUTO_ASSIGN_MATERIAL_TEXTURES=", 0) == 0) cfg.autoAssignMaterialTextures = line.substr(30) != "0";
     else if (line.rfind("HIGH_LIGHT_INTENSITY=", 0) == 0) cfg.allowHighLightIntensity = line.substr(21) != "0";
     else if (line.rfind("FOV=", 0) == 0) { try { cfg.fov = std::clamp(std::stof(line.substr(4)), 60.0f, 120.0f); } catch (...) {} }
     else if (line.rfind("UNLIMITED_ZOOM=", 0) == 0) cfg.unlimitedZoom = line.substr(15) != "0";
@@ -96,6 +103,10 @@ void ParseOptionalConfig(EditorConfig& cfg, const std::string& line) {
     else if (line.rfind("CUSTOM_THEME_PLOT_HOVERED=", 0) == 0) std::sscanf(line.substr(26).c_str(), "%f %f %f %f", cfg.customThemePlotHovered, cfg.customThemePlotHovered + 1, cfg.customThemePlotHovered + 2, cfg.customThemePlotHovered + 3);
     else if (line.rfind("CUSTOM_THEME_VIEWPORT_BG=", 0) == 0) std::sscanf(line.substr(25).c_str(), "%f %f %f", cfg.customThemeViewportBg, cfg.customThemeViewportBg + 1, cfg.customThemeViewportBg + 2);
 }
+}
+
+std::filesystem::path GetConfigDirectory() {
+    return GetConfigPath().parent_path();
 }
 
 void LoadConfig(EditorConfig& cfg) {
@@ -181,6 +192,10 @@ void SaveConfig(const EditorConfig& cfg) {
     for (const auto& wad : cfg.loadedWads) file << wad << "\n";
     file << "SKYBOX=" << cfg.skyboxName << "\n";
     file << "SHOW_FPS=" << (cfg.showFps ? "1" : "0") << "\n";
+    file << "VSYNC=" << (cfg.vsyncEnabled ? "1" : "0") << "\n";
+    file << "TEXTURE_FILTERING=" << (cfg.textureFilteringEnabled ? "1" : "0") << "\n";
+    file << "AUTO_ASSIGN_MATERIAL_TEXTURES=" << (cfg.autoAssignMaterialTextures ? "1" : "0") << "\n";
+    file << "LANGUAGE=" << (cfg.language == "ru" ? "ru" : "en") << "\n";
     file << "HIGH_LIGHT_INTENSITY=" << (cfg.allowHighLightIntensity ? "1" : "0") << "\n";
     file << "FOV=" << cfg.fov << "\n";
     file << "UNLIMITED_ZOOM=" << (cfg.unlimitedZoom ? "1" : "0") << "\n";

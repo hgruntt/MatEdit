@@ -1,7 +1,9 @@
 #include "EditorUI.h"
 #include "Skybox.h"
 #include "Contributors.h"
+#include "I18n.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cstdio>
@@ -28,6 +30,13 @@ namespace {
 
 std::optional<fs::file_time_type> g_matTextMtime;
 std::optional<fs::file_time_type> g_defTextMtime;
+bool g_matTextReloadRequested = false;
+
+bool SaveMaterialsAndRefreshText(const std::string& path, const std::vector<Material>& materials) {
+    const bool saved = SaveAllMaterials(path, materials);
+    if (saved) g_matTextReloadRequested = true;
+    return saved;
+}
 
 std::string LoadTextFile(const std::string& relativePath) {
     if (relativePath.empty() || relativePath == "None") return {};
@@ -82,6 +91,7 @@ struct DocumentFindState {
     int currentMatch = -1;
     int scrollToLine = -1;
     float scrollY = 0.0f;
+    ImGuiWindow* documentWindow = nullptr;
     bool open = false;
     bool focusSearch = false;
 };
@@ -93,7 +103,8 @@ int DocumentFindInputCallback(ImGuiInputTextCallbackData* data) {
         buffer->resize(static_cast<size_t>(data->BufTextLen) + 1u);
         data->Buf = buffer->data();
     } else if (data->EventFlag == ImGuiInputTextFlags_CallbackAlways) {
-        state->scrollY = ImGui::GetScrollY();
+        state->documentWindow = ImGui::GetCurrentWindow();
+        state->scrollY = state->documentWindow->Scroll.y;
     }
     return 0;
 }
@@ -137,9 +148,9 @@ void DrawTextDocumentEditor(
     const char* popupId = "change_popup";
 
     if (path.empty() || path == "None") {
-        ImGui::TextDisabled("NO %s FILE SELECTED", label);
+        ImGui::TextDisabled(Tr("NO %s FILE SELECTED"), label);
         if (!files.empty()) {
-            if (ImGui::Button("CHANGE##change")) ImGui::OpenPopup(popupId);
+            if (ImGui::Button(Tr("CHANGE##change"))) ImGui::OpenPopup(popupId);
             if (ImGui::BeginPopup(popupId)) {
                 for (const std::string& file : files) {
                     if (ImGui::Selectable(file.c_str())) {
@@ -159,10 +170,12 @@ void DrawTextDocumentEditor(
     std::error_code mtimeEc;
     const auto currentMtime = fs::exists(absolutePath, mtimeEc) ? fs::last_write_time(absolutePath, mtimeEc) : fs::file_time_type{};
     std::optional<fs::file_time_type>& trackedMtime = std::strcmp(id, "##MatTextEditor") == 0 ? g_matTextMtime : g_defTextMtime;
-    if (loadedPath != path || !trackedMtime || currentMtime != *trackedMtime) {
+    const bool forceReload = std::strcmp(id, "##MatTextEditor") == 0 && g_matTextReloadRequested;
+    if (loadedPath != path || !trackedMtime || currentMtime != *trackedMtime || forceReload) {
         SetTextBuffer(buffer, LoadTextFile(path));
         loadedPath = path;
         trackedMtime = currentMtime;
+        if (std::strcmp(id, "##MatTextEditor") == 0) g_matTextReloadRequested = false;
     }
 
     static DocumentFindState findState;
@@ -173,15 +186,16 @@ void DrawTextDocumentEditor(
         findState.currentMatch = -1;
         findState.scrollToLine = -1;
         findState.scrollY = 0.0f;
+        findState.documentWindow = nullptr;
     }
     if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F)) {
         findState.open = true;
         findState.focusSearch = true;
     }
 
-    ImGui::Text("%s", path.c_str());
+    ImGui::Text(Tr("%s"), path.c_str());
     ImGui::SameLine();
-    if (ImGui::Button("CHANGE##change")) ImGui::OpenPopup(popupId);
+    if (ImGui::Button(Tr("CHANGE##change"))) ImGui::OpenPopup(popupId);
     if (ImGui::BeginPopup(popupId)) {
         for (const std::string& file : files) {
             if (ImGui::Selectable(file.c_str(), path == file)) {
@@ -193,7 +207,7 @@ void DrawTextDocumentEditor(
         ImGui::EndPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("RELOAD##reload")) {
+    if (ImGui::Button(Tr("RELOAD##reload"))) {
         SetTextBuffer(buffer, LoadTextFile(path));
         loadedPath = path;
     }
@@ -212,12 +226,13 @@ void DrawTextDocumentEditor(
     const float editorWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     ImGui::SetNextItemWidth(editorWidth);
     const ImGuiInputTextFlags flags = ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_CallbackAlways;
-    if (ImGui::InputTextMultiline("##document", buffer.data(), buffer.size(), ImVec2(editorWidth, -1.0f), flags, DocumentFindInputCallback, &findState)) {
+    if (ImGui::InputTextMultiline(Tr("##document"), buffer.data(), buffer.size(), ImVec2(editorWidth, -1.0f), flags, DocumentFindInputCallback, &findState)) {
         SaveTextFile(path, std::string(buffer.data()));
         std::error_code saveEc;
         trackedMtime = fs::last_write_time(absolutePath, saveEc);
         if (textChanged) textChanged();
     }
+    if (findState.documentWindow) findState.scrollY = findState.documentWindow->Scroll.y;
 
     const ImVec2 documentMin = ImGui::GetItemRectMin();
     const ImVec2 documentMax = ImGui::GetItemRectMax();
@@ -279,7 +294,7 @@ void DrawTextDocumentEditor(
         ImGui::SetNextWindowSize(ImVec2(panelWidth, panelHeight), ImGuiCond_Always);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5.0f, panelPaddingY));
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, 0.0f));
-        ImGui::Begin("##DocumentFindOverlay", nullptr,
+        ImGui::Begin(Tr("##DocumentFindOverlay"), nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
                  ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNavFocus);
@@ -291,7 +306,7 @@ void DrawTextDocumentEditor(
         ImGui::SetNextItemWidth(searchWidth);
         if (findState.focusSearch) ImGui::SetKeyboardFocusHere();
         const std::string previousQuery = findState.query;
-        const bool enterPressed = ImGui::InputTextWithHint("##DocumentFind", "Find...", findState.query, sizeof(findState.query), ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool enterPressed = ImGui::InputTextWithHint(Tr("##DocumentFind"), Tr("Find..."), findState.query, sizeof(findState.query), ImGuiInputTextFlags_EnterReturnsTrue);
         const bool queryChanged = previousQuery != findState.query;
         if (queryChanged) findState.currentMatch = -1;
         const std::string currentNeedle = ToLower(findState.query);
@@ -328,7 +343,7 @@ void DrawTextDocumentEditor(
             (findState.currentMatch < 0 ? "0/" + std::to_string(updatedCount) : std::to_string(findState.currentMatch + 1) + "/" + std::to_string(updatedCount));
         const float counterX = controlsX + 24.0f * 2.0f + gap * 2.0f;
         ImGui::SetCursorScreenPos(ImVec2(counterX, rowStart.y + (rowHeight - ImGui::GetFontSize()) * 0.5f));
-        ImGui::TextDisabled("%s", matchCount.c_str());
+        ImGui::TextDisabled(Tr("%s"), matchCount.c_str());
         const float closeX = counterX + counterWidth + gap;
         const float closeTextY = inputY + ImGui::GetStyle().FramePadding.y - 1.5f;
         ImGui::SetCursorScreenPos(ImVec2(closeX, inputY + (inputHeight - 20.0f) * 0.5f));
@@ -412,7 +427,6 @@ bool g_openTextureDeletePopup = false;
 bool g_openNewMaterialPopup = false;
 char g_newMaterialName[128] = "new_material";
 fs::path g_creatorPendingDeletePath;
-int g_creatorGlossMetric = 0;
 int g_creatorBumpHeightChannel = 1;
 bool g_creatorBumpInvert = false;
 float g_creatorBumpContrast = 1.0f;
@@ -438,6 +452,11 @@ float g_materialCreatorNormalStrength = 2.0f;
 float g_materialCreatorNormalSharpness = 0.0f;
 int g_materialCreatorNormalHeightChannel = 0;
 bool g_materialCreatorNormalInvertHeight = false;
+float g_materialCreatorNormalBlackPoint = 0.0f;
+float g_materialCreatorNormalWhitePoint = 1.0f;
+float g_materialCreatorNormalSmoothing = 0.0f;
+int g_materialCreatorNormalFilter = 0;
+bool g_materialCreatorNormalTileEdges = false;
 bool g_materialCreatorFlipX = false;
 bool g_materialCreatorFlipY = true;
 bool g_materialCreatorFullZRange = false;
@@ -451,8 +470,15 @@ bool g_materialCreatorGlossInvert = false;
 float g_materialCreatorGlossLower = 0.0f;
 float g_materialCreatorGlossUpper = 1.0f;
 bool g_materialCreatorGlossNormalize = true;
+int g_materialCreatorGlossSource = 0;
+float g_materialCreatorGlossSoftness = 0.0f;
 bool g_materialCreatorGlossMipmaps = true;
 int g_materialCreatorGlossFormat = 0;
+float g_creatorBumpBlackPoint = 0.0f;
+float g_creatorBumpWhitePoint = 1.0f;
+float g_creatorBumpGamma = 1.0f;
+float g_creatorBumpSmoothing = 0.0f;
+bool g_creatorBumpTileEdges = false;
 char g_newMatFile[128] = "materials.mat";
 char g_newMatTexture[256] = "";
 char g_newDefFile[128] = "materials.def";
@@ -477,7 +503,7 @@ void ShowTooltip(const char* text) {
     if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) return;
     ImGui::BeginTooltip();
     ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
-    ImGui::TextUnformatted(text);
+    ImGui::TextUnformatted(Tr(text));
     ImGui::PopTextWrapPos();
     ImGui::EndTooltip();
 }
@@ -487,7 +513,7 @@ bool DrawDeleteXButton(const char* id, float textY) {
     const bool pressed = ImGui::InvisibleButton(id, size);
     const bool hovered = ImGui::IsItemHovered();
     const ImVec2 min = ImGui::GetItemRectMin();
-    const ImVec2 textSize = ImGui::CalcTextSize("X");
+    const ImVec2 textSize = ImGui::CalcTextSize(Tr("X"));
     const ImVec2 textPos(min.x + (size.x - textSize.x) * 0.5f, textY + 3.0f);
     const ImU32 color = ImGui::GetColorU32(hovered ? ImGuiCol_HeaderActive : ImGuiCol_TextDisabled);
     ImGui::GetWindowDrawList()->AddText(textPos, color, "X");
@@ -532,6 +558,14 @@ void ReleasePreview() {
     ReleaseTexturePreview(g_preview.info);
     g_preview.reference.clear();
     g_preview.kind.clear();
+}
+
+void ReleasePreviewForPath(const fs::path& path) {
+    if (g_preview.reference.empty() || g_preview.reference.rfind("wad://", 0) == 0 ||
+        g_preview.reference.rfind("wad:/", 0) == 0) return;
+    fs::path previewPath(g_preview.reference);
+    if (previewPath.is_relative()) previewPath = gameRootPath / previewPath;
+    if (previewPath.lexically_normal() == path.lexically_normal()) ReleasePreview();
 }
 
 void SelectTexture(const std::string& reference, const std::string& kind) {
@@ -654,7 +688,7 @@ void RequestCreatorDeleteTexture(const fs::path& path) {
 void DrawCreatorDeletePopup() {
     if (g_creatorOpenDeletePopup) {
         g_creatorOpenDeletePopup = false;
-        ImGui::OpenPopup("##CreatorDeleteTexture");
+        ImGui::OpenPopup(Tr("##CreatorDeleteTexture"));
     }
     static ImVec2 lastViewportSize(0.0f, 0.0f);
     const ImVec2 viewportSize = ImGui::GetMainViewport()->Size;
@@ -663,14 +697,14 @@ void DrawCreatorDeletePopup() {
         lastViewportSize = viewportSize;
     }
     if (!BeginSpacedModal("##CreatorDeleteTexture", ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) return;
-    ImGui::TextUnformatted("Delete texture?");
-    ImGui::TextWrapped("%s", g_creatorPendingDeletePath.filename().string().c_str());
+    ImGui::TextUnformatted(Tr("Delete texture?"));
+    ImGui::TextWrapped(Tr("%s"), g_creatorPendingDeletePath.filename().string().c_str());
     ImGui::Spacing();
     const float width = 108.0f;
     const float gap = ImGui::GetStyle().ItemSpacing.x;
     const float row = width * 2.0f + gap;
     ImGui::SetCursorPosX(std::max(0.0f, (ImGui::GetWindowContentRegionMax().x - row) * 0.5f));
-    if (ImGui::Button("DELETE", ImVec2(width, 32.0f))) {
+    if (ImGui::Button(Tr("DELETE"), ImVec2(width, 32.0f))) {
         std::error_code ec;
         fs::remove(g_creatorPendingDeletePath, ec);
         if (!ec) InvalidateBrowserCaches();
@@ -678,18 +712,64 @@ void DrawCreatorDeletePopup() {
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("CANCEL", ImVec2(width, 32.0f))) {
+    if (ImGui::Button(Tr("CANCEL"), ImVec2(width, 32.0f))) {
         g_creatorPendingDeletePath.clear();
         ImGui::CloseCurrentPopup();
     }
     EndSpacedModal();
 }
 
-void DrawNewMaterialPopup(const std::string& currentFileName, std::vector<Material>& materials, int& currentMatIndex) {
+void AssignTexture(Material& material, const char* field, const std::string& reference);
+
+std::string GetNewMaterialNameFromBrowserSelection() {
+    if (g_preview.reference.empty()) return "new_material";
+
+    std::string selected = g_preview.reference;
+    if (selected.rfind("wad://", 0) == 0 || selected.rfind("wad:/", 0) == 0) {
+        const std::size_t separator = selected.rfind('#');
+        if (separator != std::string::npos) selected = selected.substr(separator + 1);
+    }
+
+    const fs::path selectedPath(selected);
+    std::string name = selectedPath.filename().string();
+    if (name.empty()) name = selected;
+    const std::string extension = ToLower(fs::path(name).extension().string());
+    if (extension == ".dds" || extension == ".png" || extension == ".tga") {
+        name = fs::path(name).stem().string();
+    }
+    return name.empty() ? "new_material" : name;
+}
+
+std::string GetSelectedTextureStem() {
+    std::string selected = g_preview.reference;
+    if (selected.rfind("wad://", 0) == 0 || selected.rfind("wad:/", 0) == 0) {
+        const std::size_t separator = selected.rfind('#');
+        if (separator != std::string::npos) selected = selected.substr(separator + 1);
+    }
+    const fs::path selectedPath(selected);
+    std::string stem = selectedPath.stem().string();
+    if (stem.empty()) stem = selectedPath.filename().string();
+    return stem;
+}
+
+void AutoAssignMaterialTextures(Material& material) {
+    RefreshMaterialTextureIndex();
+    AutoAssignMaterialTexturesByName(material);
+    const std::string stem = fs::path(material.name).stem().string();
+    const std::string selectedStem = GetSelectedTextureStem();
+    if (material.diffusePath[0] == '\0' && !g_preview.reference.empty() &&
+        ToLower(selectedStem) == ToLower(stem)) {
+        AssignTexture(material, "diffuse", g_preview.reference);
+        material.syncParams();
+    }
+}
+
+void DrawNewMaterialPopup(const std::string& currentFileName, std::vector<Material>& materials, int& currentMatIndex, EditorConfig& editorCfg) {
     if (g_openNewMaterialPopup) {
         g_openNewMaterialPopup = false;
-        std::snprintf(g_newMaterialName, sizeof(g_newMaterialName), "%s", "new_material");
-        ImGui::OpenPopup("##NewMaterial");
+        const std::string suggestedName = GetNewMaterialNameFromBrowserSelection();
+        std::snprintf(g_newMaterialName, sizeof(g_newMaterialName), "%s", suggestedName.c_str());
+        ImGui::OpenPopup(Tr("##NewMaterial"));
     }
     static ImVec2 lastViewportSize(0.0f, 0.0f);
     const ImVec2 viewportSize = ImGui::GetMainViewport()->Size;
@@ -698,9 +778,9 @@ void DrawNewMaterialPopup(const std::string& currentFileName, std::vector<Materi
         lastViewportSize = viewportSize;
     }
     if (!BeginSpacedModal("##NewMaterial", ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) return;
-    ImGui::TextUnformatted("NEW MATERIAL");
+    ImGui::TextUnformatted(Tr("NEW MATERIAL"));
     ImGui::SetNextItemWidth(360.0f);
-    ImGui::InputText("##NewMaterialName", g_newMaterialName, sizeof(g_newMaterialName), ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::InputText(Tr("##NewMaterialName"), g_newMaterialName, sizeof(g_newMaterialName), ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::Spacing();
     const float buttonWidth = 112.0f;
     const float gap = ImGui::GetStyle().ItemSpacing.x;
@@ -708,29 +788,44 @@ void DrawNewMaterialPopup(const std::string& currentFileName, std::vector<Materi
     ImGui::SetCursorPosX(std::max(0.0f, (ImGui::GetWindowContentRegionMax().x - rowWidth) * 0.5f));
     const bool canCreate = g_newMaterialName[0] != '\0';
     if (!canCreate) ImGui::BeginDisabled();
-    if (ImGui::Button("CREATE", ImVec2(buttonWidth, 32.0f))) {
-        Material newMat;
-        newMat.name = g_newMaterialName;
-        std::snprintf(newMat.diffusePath, sizeof(newMat.diffusePath), "%s", "textures/default");
-        newMat.smoothness = 1.0f;
-        newMat.reflectScale = 0.3f;
-        newMat.syncParams();
-        materials.push_back(newMat);
-        currentMatIndex = static_cast<int>(materials.size()) - 1;
-        materials[currentMatIndex].loadTextures();
-        SaveAllMaterials(currentFileName, materials);
+    if (ImGui::Button(Tr("CREATE"), ImVec2(buttonWidth, 32.0f))) {
+        const std::string requestedName = g_newMaterialName;
+        const std::string normalizedName = ToLower(requestedName);
+        const auto existing = std::find_if(materials.begin(), materials.end(), [&](const Material& material) {
+            return ToLower(material.name) == normalizedName;
+        });
+        if (existing != materials.end()) {
+            currentMatIndex = static_cast<int>(std::distance(materials.begin(), existing));
+            Material& material = materials[currentMatIndex];
+            if (editorCfg.autoAssignMaterialTextures) {
+                AutoAssignMaterialTextures(material);
+                material.syncParams();
+            }
+            material.loadTextures();
+        } else {
+            Material newMat;
+            newMat.name = requestedName;
+            newMat.smoothness = 1.0f;
+            newMat.reflectScale = 0.3f;
+            if (editorCfg.autoAssignMaterialTextures) AutoAssignMaterialTextures(newMat);
+            newMat.syncParams();
+            materials.push_back(std::move(newMat));
+            currentMatIndex = static_cast<int>(materials.size()) - 1;
+            materials[currentMatIndex].loadTextures();
+        }
+        SaveMaterialsAndRefreshText(currentFileName, materials);
         ImGui::CloseCurrentPopup();
     }
     if (!canCreate) ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("CANCEL", ImVec2(buttonWidth, 32.0f))) ImGui::CloseCurrentPopup();
+    if (ImGui::Button(Tr("CANCEL"), ImVec2(buttonWidth, 32.0f))) ImGui::CloseCurrentPopup();
     EndSpacedModal();
 }
 
 void DrawTextureDeletePopup() {
     if (g_openTextureDeletePopup) {
         g_openTextureDeletePopup = false;
-        ImGui::OpenPopup("##DeleteTextureConfirm");
+        ImGui::OpenPopup(Tr("##DeleteTextureConfirm"));
     }
     static ImVec2 lastViewportSize(0.0f, 0.0f);
     const ImVec2 viewportSize = ImGui::GetMainViewport()->Size;
@@ -739,14 +834,14 @@ void DrawTextureDeletePopup() {
         lastViewportSize = viewportSize;
     }
     if (!BeginSpacedModal("##DeleteTextureConfirm", ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) return;
-    ImGui::TextUnformatted("Delete texture?");
-    ImGui::TextWrapped("%s", g_pendingTextureDeletePath.filename().string().c_str());
+    ImGui::TextUnformatted(Tr("Delete texture?"));
+    ImGui::TextWrapped(Tr("%s"), g_pendingTextureDeletePath.filename().string().c_str());
     ImGui::Spacing();
     const float buttonWidth = 112.0f;
     const float gap = ImGui::GetStyle().ItemSpacing.x;
     const float rowWidth = buttonWidth * 2.0f + gap;
     ImGui::SetCursorPosX(std::max(0.0f, (ImGui::GetWindowContentRegionMax().x - rowWidth) * 0.5f));
-    if (ImGui::Button("DELETE", ImVec2(buttonWidth, 32.0f))) {
+    if (ImGui::Button(Tr("DELETE"), ImVec2(buttonWidth, 32.0f))) {
         std::error_code ec;
         const fs::path deleted = g_pendingTextureDeletePath;
         if (fs::remove(deleted, ec) && !ec) {
@@ -759,7 +854,7 @@ void DrawTextureDeletePopup() {
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("CANCEL", ImVec2(buttonWidth, 32.0f))) {
+    if (ImGui::Button(Tr("CANCEL"), ImVec2(buttonWidth, 32.0f))) {
         g_pendingTextureDeletePath.clear();
         ImGui::CloseCurrentPopup();
     }
@@ -822,9 +917,10 @@ bool CreatorPathInsideGame(const fs::path& path) {
     return candidate == root || (candidate.size() > root.size() && candidate.rfind(root + "/", 0) == 0);
 }
 
-void SelectMat(const std::string& path, std::vector<Material>& materials, int& currentMatIndex, std::string& currentFileName) {
+void SelectMat(const std::string& path, std::vector<Material>& materials, int& currentMatIndex,
+               std::string& currentFileName, bool autoAssignTextures) {
     if (currentFileName == path && !materials.empty()) return;
-    if (!LoadAllMaterials(path, materials)) return;
+    if (!LoadAllMaterials(path, materials, autoAssignTextures)) return;
     currentFileName = path;
     currentMatIndex = materials.empty() ? -1 : 0;
     if (currentMatIndex >= 0) materials[currentMatIndex].loadTextures();
@@ -837,10 +933,11 @@ void SelectDef(const std::string& path, std::vector<PhysicalMaterialEntry>& phys
     if (currentPhysMatIndex >= 0) physicalMaterials[currentPhysMatIndex].updateBuffers();
 }
 
-void ReloadMaterialsPreserveSelection(const std::string& path, std::vector<Material>& materials, int& currentMatIndex) {
+void ReloadMaterialsPreserveSelection(const std::string& path, std::vector<Material>& materials,
+                                      int& currentMatIndex, bool autoAssignTextures) {
     const std::string selectedName = currentMatIndex >= 0 && static_cast<size_t>(currentMatIndex) < materials.size() ? materials[currentMatIndex].name : std::string();
     std::vector<Material> fresh;
-    if (!LoadAllMaterials(path, fresh)) return;
+    if (!LoadAllMaterials(path, fresh, autoAssignTextures)) return;
     for (auto& material : materials) material.releaseTextures();
     materials = std::move(fresh);
     currentMatIndex = -1;
@@ -900,40 +997,48 @@ void AssignTexture(Material& material, const char* field, const std::string& ref
 }
 
 
-void AssignSelected(Material* material, const char* field) {
+void AssignSelected(Material* material, const char* field, const std::string& currentFileName,
+                    const std::vector<Material>& materials) {
     if (!material || g_preview.reference.empty() || !g_preview.info.valid || g_preview.info.texture == 0) return;
     AssignTexture(*material, field, g_preview.reference);
     material->syncParams();
     material->loadTextures();
+    SaveMaterialsAndRefreshText(currentFileName, materials);
 }
 
-void DrawAssignGrid(Material* material) {
-    ImGui::TextDisabled("ASSIGN SELECTED TEXTURE AS");
-    const char* labels[] = {"DIFFUSE", "NORMAL", "GLOSS", "LUMA", "BUMP", "DETAIL"};
+void DrawAssignGrid(Material* material, const std::string& currentFileName,
+                    const std::vector<Material>& materials) {
+    ImGui::TextDisabled(Tr("ASSIGN SELECTED TEXTURE AS"));
+    const char* labels[] = {
+        Tr("DIFFUSE"), Tr("NORMAL"), Tr("GLOSS"), Tr("LUMA"), Tr("BUMP"), Tr("DETAIL")
+    };
     const char* fields[] = {"diffuse", "normal", "gloss", "luma", "bump", "detail"};
     const float gap = ImGui::GetStyle().ItemSpacing.x;
     const float width = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
     for (int i = 0; i < 6; ++i) {
         if ((i & 1) != 0) ImGui::SameLine();
-        if (ImGui::Button(labels[i], ImVec2(std::max(60.0f, width), 22.0f))) AssignSelected(material, fields[i]);
+        if (ImGui::Button(labels[i], ImVec2(std::max(60.0f, width), 22.0f))) {
+            AssignSelected(material, fields[i], currentFileName, materials);
+        }
     }
 }
 
-void DrawPreview(Material* material, float width) {
-    ImGui::BeginChild("TexturePreviewContent", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar);
+void DrawPreview(Material* material, float width, const std::string& currentFileName,
+                 const std::vector<Material>& materials) {
+    ImGui::BeginChild(Tr("TexturePreviewContent"), ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar);
 
     if (g_preview.reference.empty()) {
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         ImGui::SetCursorPos(ImVec2(std::max(8.0f, (avail.x - 150.0f) * 0.5f), std::max(20.0f, (avail.y - 20.0f) * 0.5f)));
-        ImGui::TextDisabled("CLICK A TEXTURE");
+        ImGui::TextDisabled(Tr("CLICK A TEXTURE"));
         ImGui::EndChild();
         return;
     }
 
-    ImGui::Text("%s", g_preview.reference.c_str());
-    ImGui::TextDisabled("%s", g_preview.kind.c_str());
+    ImGui::Text(Tr("%s"), g_preview.reference.c_str());
+    ImGui::TextDisabled("%s", Tr(g_preview.kind.c_str()));
     if (g_preview.info.valid) {
-        ImGui::TextDisabled("%d x %d", g_preview.info.width, g_preview.info.height);
+        ImGui::TextDisabled(Tr("%d x %d"), g_preview.info.width, g_preview.info.height);
         ImGui::Spacing();
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         const float rowHeight = 22.0f;
@@ -941,7 +1046,7 @@ void DrawPreview(Material* material, float width) {
         const float assignHeight = ImGui::GetTextLineHeightWithSpacing() +
                        (rowHeight + itemSpacingY) * 3.0f + itemSpacingY;
         const float imageAreaHeight = std::clamp(avail.y - assignHeight, 1.0f, 220.0f);
-        ImGui::BeginChild("##TextureImageArea", ImVec2(0.0f, imageAreaHeight), false,
+        ImGui::BeginChild(Tr("##TextureImageArea"), ImVec2(0.0f, imageAreaHeight), false,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         const ImVec2 imageAvail = ImGui::GetContentRegionAvail();
         const float aspect = static_cast<float>(g_preview.info.width) /
@@ -958,13 +1063,13 @@ void DrawPreview(Material* material, float width) {
         ImGui::Image(static_cast<ImTextureID>(g_preview.info.texture), ImVec2(imageW, imageH));
         ImGui::EndChild();
     } else {
-        ImGui::BeginChild("NoPreview", ImVec2(0, 100.0f), true);
-        ImGui::TextDisabled("PREVIEW UNAVAILABLE");
+        ImGui::BeginChild(Tr("NoPreview"), ImVec2(0, 100.0f), true);
+        ImGui::TextDisabled(Tr("PREVIEW UNAVAILABLE"));
         ImGui::EndChild();
     }
 
-    if (material) DrawAssignGrid(material);
-    else ImGui::TextDisabled("LOAD A .MAT FILE TO ASSIGN TEXTURES");
+    if (material) DrawAssignGrid(material, currentFileName, materials);
+    else ImGui::TextDisabled(Tr("LOAD A .MAT FILE TO ASSIGN TEXTURES"));
     (void)width;
     ImGui::EndChild();
 }
@@ -975,7 +1080,7 @@ void DrawWadNode(const WadArchive& wad, const std::string& filter) {
     });
     if (!hasMatch) return;
 
-    const std::string id = "WAD  " + wad.displayName + "  [" + std::to_string(wad.textures.size()) + "]##" + wad.relativePath;
+    const std::string id = std::string(Tr("WAD")) + "  " + wad.displayName + "  [" + std::to_string(wad.textures.size()) + "]##" + wad.relativePath;
     const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | (!filter.empty() ? ImGuiTreeNodeFlags_DefaultOpen : 0);
     ImGui::Indent(4.0f);
     const bool open = DrawBrowserTreeNode(id.c_str(), flags);
@@ -988,7 +1093,7 @@ void DrawWadNode(const WadArchive& wad, const std::string& filter) {
             const auto& texture = wad.textures[static_cast<std::size_t>(i)];
             const std::string ref = MakeWadTextureReference(wad, texture);
             if (!MatchesFilter(texture.name, filter) && !MatchesFilter(ref, filter)) continue;
-            const std::string label = "TEXTURE  " + texture.name + "##" + ref;
+            const std::string label = std::string(Tr("TEXTURE")) + "  " + texture.name + "##" + ref;
             ImGui::Indent(4.0f);
             if (DrawBrowserSelectable(label.c_str(), g_preview.reference == ref)) SelectTexture(ref, "WAD");
             ImGui::Unindent(4.0f);
@@ -1071,27 +1176,27 @@ void DrawSearchResults(const std::string& filter, EditorConfig& cfg, std::vector
             g_cachedSearchFilter = filter;
             g_cachedWadCount = wadCount;
             constexpr std::size_t maxResults = 500;
+            for (const WadArchive& wad : GetWadArchives()) {
+                for (const WadTexture& texture : wad.textures) {
+                    if (g_cachedSearchResults.size() >= maxResults) break;
+                    const std::string ref = MakeWadTextureReference(wad, texture);
+                    if (!MatchesFilter(texture.name, filter) && !MatchesFilter(ref, filter)) continue;
+                    g_cachedSearchResults.push_back({
+                        "TEXTURE  " + texture.name + "  [" + wad.relativePath + "]", ref, 0
+                    });
+                }
+                if (g_cachedSearchResults.size() >= maxResults) break;
+            }
             for (const BrowserEntry& entry : g_searchEntries) {
                 if (g_cachedSearchResults.size() >= maxResults) break;
                 const bool fileMatch = MatchesFilter(entry.path.filename().string(), filter) || MatchesFilter(entry.relative, filter);
-                if (!fileMatch && !entry.wad) continue;
+                if (!fileMatch) continue;
                 if (entry.wad) {
-                    const WadArchive* wad = FindLoadedWad(entry.relative);
-                    if (wad) {
-                        for (const auto& texture : wad->textures) {
-                            if (g_cachedSearchResults.size() >= maxResults) break;
-                            const std::string ref = MakeWadTextureReference(*wad, texture);
-                            if (!MatchesFilter(texture.name, filter) && !MatchesFilter(ref, filter)) continue;
-                            g_cachedSearchResults.push_back({
-                                "TEXTURE  " + texture.name + "  [" + wad->relativePath + "]", ref, 0
-                            });
-                        }
-                    } else if (fileMatch) {
+                    if (!FindLoadedWad(entry.relative)) {
                         g_cachedSearchResults.push_back({"WAD  " + entry.relative + "  [CLICK TO LOAD]", entry.relative, 1});
                     }
                     continue;
                 }
-                if (!fileMatch) continue;
                 const std::string prefix = entry.dds ? "DDS  " : "DEF  ";
                 g_cachedSearchResults.push_back({prefix + entry.relative, entry.relative, entry.dds ? 2 : 3});
             }
@@ -1132,7 +1237,7 @@ void DrawSearchResults(const std::string& filter, EditorConfig& cfg, std::vector
             }
         }
     }
-    if (g_cachedSearchResults.empty() && ready) ImGui::TextDisabled("NO SEARCH RESULTS");
+    if (g_cachedSearchResults.empty() && ready) ImGui::TextDisabled(Tr("NO SEARCH RESULTS"));
 }
 
 void DrawDirectory(const fs::path& dir, const std::string& filter, EditorConfig& cfg, std::vector<Material>& materials,
@@ -1179,7 +1284,7 @@ void DrawDirectory(const fs::path& dir, const std::string& filter, EditorConfig&
             if (loaded) {
                 DrawWadNode(*loaded, filter);
             } else if (MatchesFilter(entry->relative, filter) || MatchesFilter(entry->path.filename().string(), filter)) {
-                const std::string label = "WAD  " + entry->path.filename().string() + "  [CLICK TO LOAD]##" + entry->relative;
+                const std::string label = std::string(Tr("WAD")) + "  " + entry->path.filename().string() + "  [" + Tr("CLICK TO LOAD") + "]##" + entry->relative;
                 ImGui::Indent(4.0f);
                 if (DrawBrowserSelectable(label.c_str(), false)) {
                     if (AddWadArchive(entry->relative)) SaveWads(cfg);
@@ -1189,7 +1294,7 @@ void DrawDirectory(const fs::path& dir, const std::string& filter, EditorConfig&
         } else if (entry->dds) {
             ImGui::PushID(("DDSROW:" + entry->relative).c_str());
             ImGui::Indent(4.0f);
-            const std::string label = "DDS  " + entry->path.filename().string();
+            const std::string label = std::string(Tr("DDS")) + "  " + entry->path.filename().string();
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
             const float xWidth = 20.0f;
             const float rowTextY = ImGui::GetCursorScreenPos().y;
@@ -1207,7 +1312,7 @@ void DrawDirectory(const fs::path& dir, const std::string& filter, EditorConfig&
             ImGui::Unindent(4.0f);
             ImGui::PopID();
         } else if (entry->def) {
-            const std::string label = "DEF  " + entry->path.filename().string() + "##" + entry->relative;
+            const std::string label = std::string(Tr("DEF")) + "  " + entry->path.filename().string() + "##" + entry->relative;
             ImGui::Indent(4.0f);
             if (DrawBrowserSelectable(label.c_str(), currentDefFile == entry->relative)) SelectDef(entry->relative, physicalMaterials, currentPhysMatIndex, currentDefFile);
             ImGui::Unindent(4.0f);
@@ -1264,21 +1369,21 @@ bool DrawResettableInput(const char* id, const char* label, char* buffer, size_t
     bool changed = false;
 
     ImGui::PushID(id);
-    ImGui::TextUnformatted(label);
+    ImGui::TextUnformatted(Tr(label));
     ImGui::SameLine();
     ImGui::SetCursorPosX(startX + labelWidth);
-    if (ImGui::Button("X##reset", ImVec2(buttonWidth, 0.0f))) {
+    if (ImGui::Button(Tr("X##reset"), ImVec2(buttonWidth, 0.0f))) {
         if (buffer[0] != '\0') {
             buffer[0] = '\0';
             changed = true;
         }
     }
     ImGui::SameLine(0.0f, gap);
-    if (ImGui::Button(visible ? "S##visibility" : "H##visibility", ImVec2(buttonWidth, 0.0f))) visible = !visible;
+    if (ImGui::Button(visible ? Tr("S##visibility") : Tr("H##visibility"), ImVec2(buttonWidth, 0.0f))) visible = !visible;
     ShowTooltip(visible ? "Show texture in the viewport." : "Hide texture in the viewport.");
     ImGui::SameLine(0.0f, gap);
     ImGui::SetNextItemWidth(inputWidth);
-    if (ImGui::InputText("##value", buffer, bufferSize)) changed = true;
+    if (ImGui::InputText(Tr("##value"), buffer, bufferSize)) changed = true;
     ImGui::PopID();
     return changed;
 }
@@ -1576,10 +1681,11 @@ bool DrawCheckbox(const char* label, bool* value) {
 
     ImGui::PushID(label);
     const float square = ImGui::GetFrameHeight();
-    const ImVec2 labelSize = ImGui::CalcTextSize(label);
+    const char* displayLabel = Tr(label);
+    const ImVec2 labelSize = ImGui::CalcTextSize(displayLabel);
     const ImVec2 totalSize(square + style.ItemInnerSpacing.x + labelSize.x, square);
     const ImVec2 pos = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##theme_checkbox", totalSize);
+    ImGui::InvisibleButton(Tr("##theme_checkbox"), totalSize);
     const bool hoveredItem = ImGui::IsItemHovered();
     const bool held = ImGui::IsItemActive();
     const bool pressed = ImGui::IsItemClicked(ImGuiMouseButton_Left);
@@ -1591,35 +1697,135 @@ bool DrawCheckbox(const char* label, bool* value) {
     drawList->AddRectFilled(pos, boxMax, ImGui::ColorConvertFloat4ToU32(fill), style.FrameRounding);
     if (*value) {
         const float pad = std::max(1.0f, square * 0.22f);
-        const ImVec2 a(pos.x + pad, pos.y + square * 0.52f);
-        const ImVec2 b(pos.x + square * 0.43f, pos.y + square - pad);
-        const ImVec2 c(pos.x + square - pad, pos.y + pad);
+        const ImVec2 check[] = {
+            ImVec2(pos.x + pad, pos.y + square * 0.50f),
+            ImVec2(pos.x + square * 0.43f, pos.y + square - pad),
+            ImVec2(pos.x + square - pad, pos.y + pad)
+        };
         const ImU32 markColor = ImGui::ColorConvertFloat4ToU32(mark);
-        drawList->AddLine(a, b, markColor, std::max(1.5f, square * 0.12f));
-        drawList->AddLine(b, c, markColor, std::max(1.5f, square * 0.12f));
+        drawList->AddPolyline(check, 3, markColor, ImDrawFlags_None, std::max(1.5f, square * 0.13f));
     }
     const ImVec2 textPos(pos.x + square + style.ItemInnerSpacing.x, pos.y + style.FramePadding.y);
-    drawList->AddText(textPos, ImGui::ColorConvertFloat4ToU32(style.Colors[ImGuiCol_Text]), label);
+    drawList->AddText(textPos, ImGui::ColorConvertFloat4ToU32(style.Colors[ImGuiCol_Text]), displayLabel);
     ImGui::PopID();
     return pressed;
 }
 
 
-bool CreatorSlider(const char* label, float* value, float minValue, float maxValue, const char* tooltip) {
+bool CreatorGridBegin(const char* id) {
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(0.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+    if (!ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_NoPadOuterX)) {
+        ImGui::PopStyleVar(2);
+        return false;
+    }
+    ImGui::TableSetupColumn(Tr("##Setting"), ImGuiTableColumnFlags_WidthStretch, 0.9f);
+    ImGui::TableSetupColumn(Tr("##Value"), ImGuiTableColumnFlags_WidthStretch, 1.1f);
+    return true;
+}
+
+struct CreatorPanelsLayout {
+    bool stacked;
+    float previewWidth;
+    float previewHeight;
+};
+
+CreatorPanelsLayout GetCreatorPanelsLayout() {
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+    const bool stacked = available.x < 900.0f;
+    return {
+        stacked,
+        stacked ? 0.0f : std::clamp(available.x * 0.44f, 320.0f, 520.0f),
+        stacked ? std::clamp(available.y * 0.36f, 190.0f, 280.0f) : 0.0f
+    };
+}
+
+void CreatorGridSection(const char* title) {
+    const ImVec2 cellPadding = ImGui::GetStyle().CellPadding;
+    const float rowHeight = ImGui::GetFrameHeight() + cellPadding.y * 2.0f;
+    const float titleInset = 8.0f;
+    ImGui::TableNextRow(ImGuiTableRowFlags_None, rowHeight);
+    ImGui::TableSetColumnIndex(0);
+    const ImVec2 firstCellPos = ImGui::GetCursorScreenPos();
+    const float rounding = ImGui::GetStyle().FrameRounding;
+    ImGui::TableSetColumnIndex(1);
+    const ImVec2 secondCellPos = ImGui::GetCursorScreenPos();
+    const float secondCellWidth = ImGui::GetContentRegionAvail().x;
+    ImVec2 clipMin = ImGui::GetWindowDrawList()->GetClipRectMin();
+    ImVec2 clipMax = ImGui::GetWindowDrawList()->GetClipRectMax();
+    clipMin.x = firstCellPos.x - cellPadding.x;
+    clipMax.x = secondCellPos.x + secondCellWidth + cellPadding.x;
+    ImGui::GetWindowDrawList()->PushClipRect(clipMin, clipMax, false);
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        ImVec2(clipMin.x, firstCellPos.y + cellPadding.y),
+        ImVec2(clipMax.x, secondCellPos.y + rowHeight - cellPadding.y),
+        ImGui::GetColorU32(ImGuiCol_Header), rounding);
+    ImGui::GetWindowDrawList()->AddText(
+        ImVec2(firstCellPos.x + titleInset, firstCellPos.y + cellPadding.y + ImGui::GetStyle().FramePadding.y),
+        IM_COL32(255, 255, 255, 255), Tr(title));
+    ImGui::GetWindowDrawList()->PopClipRect();
+}
+
+bool CreatorGridSlider(const char* label, float* value, float minValue, float maxValue, const char* tooltip) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", Tr(label));
+    ImGui::TableSetColumnIndex(1);
+    ImGui::PushID(label);
     ImGui::SetNextItemWidth(-1.0f);
-    const bool changed = ImGui::SliderFloat(label, value, minValue, maxValue, "%.3f");
-    if (tooltip && tooltip[0] && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tooltip);
+    const bool changed = ImGui::SliderFloat(Tr("##value"), value, minValue, maxValue, "%.2f");
+    if (tooltip && tooltip[0] && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Tr(tooltip));
+    ImGui::PopID();
     return changed;
 }
 
+bool CreatorGridCheckbox(const char* label, bool* value, const char* tooltip) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", Tr(label));
+    ImGui::TableSetColumnIndex(1);
+    ImGui::PushID(label);
+    const bool changed = DrawCheckbox(Tr(""), value);
+    if (tooltip && tooltip[0] && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Tr(tooltip));
+    ImGui::PopID();
+    return changed;
+}
+
+bool CreatorGridCombo(const char* label, int* value, const char* const items[], int itemCount, const char* tooltip) {
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", Tr(label));
+    ImGui::TableSetColumnIndex(1);
+    ImGui::PushID(label);
+    ImGui::SetNextItemWidth(-1.0f);
+    std::vector<const char*> localizedItems;
+    localizedItems.reserve(static_cast<std::size_t>(itemCount));
+    for (int i = 0; i < itemCount; ++i) localizedItems.push_back(Tr(items[i]));
+    const bool changed = ImGui::Combo(Tr("##value"), value, localizedItems.data(), itemCount);
+    if (tooltip && tooltip[0] && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Tr(tooltip));
+    ImGui::PopID();
+    return changed;
+}
+
+void CreatorGridEnd() {
+    ImGui::EndTable();
+    ImGui::PopStyleVar(2);
+}
+
 void DrawCreatorImagePreview(const char* title, PreviewState& preview) {
-    ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", title);
+    ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr(title));
     ImGui::SameLine();
-    if (ImGui::Button("SWAP")) preview.showSource = !preview.showSource;
+    if (ImGui::Button(Tr("SWAP"))) preview.showSource = !preview.showSource;
     ImGui::SameLine();
-    if (ImGui::Button("FIT")) { preview.zoom = 1.0f; preview.pan = ImVec2(0.0f, 0.0f); }
+    if (ImGui::Button(Tr("FIT"))) { preview.zoom = 1.0f; preview.pan = ImVec2(0.0f, 0.0f); }
     ImGui::SameLine();
-    ImGui::Text("%.0f%%", preview.zoom * 100.0f);
+    ImGui::Text(Tr("%.0f%%"), preview.zoom * 100.0f);
     ImGui::Spacing();
 
     const TexturePreviewInfo* info = &preview.info;
@@ -1627,11 +1833,11 @@ void DrawCreatorImagePreview(const char* title, PreviewState& preview) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     if (!info->valid || info->texture == 0 || info->width <= 0 || info->height <= 0) {
         ImGui::SetCursorPos(ImVec2(std::max(8.0f, (avail.x - 170.0f) * 0.5f), std::max(20.0f, (avail.y - 20.0f) * 0.5f)));
-        ImGui::TextDisabled("PREVIEW UNAVAILABLE");
+        ImGui::TextDisabled(Tr("PREVIEW UNAVAILABLE"));
         return;
     }
 
-    ImGui::BeginChild("##CreatorPreviewCanvas", ImVec2(0.0f, std::max(40.0f, avail.y)), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild(Tr("##CreatorPreviewCanvas"), ImVec2(0.0f, std::max(40.0f, avail.y)), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 canvas = ImGui::GetContentRegionAvail();
     const float aspect = static_cast<float>(info->width) / static_cast<float>(std::max(1, info->height));
     float fitW = canvas.x - 12.0f;
@@ -1645,7 +1851,7 @@ void DrawCreatorImagePreview(const char* title, PreviewState& preview) {
     const ImVec2 minPos(center.x - imageW * 0.5f, center.y - imageH * 0.5f);
 
     ImGui::SetCursorScreenPos(origin);
-    ImGui::InvisibleButton("##CreatorPreviewInput", canvas, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+    ImGui::InvisibleButton(Tr("##CreatorPreviewInput"), canvas, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
     if (ImGui::IsItemHovered()) {
         const float wheel = ImGui::GetIO().MouseWheel;
         if (wheel != 0.0f) {
@@ -1735,10 +1941,61 @@ void SetCreatorDiffuse(const std::string& reference) {
     }
 }
 
+NormalMapSettings GetCreatorNormalSettings() {
+    NormalMapSettings settings;
+    settings.strength = g_materialCreatorNormalStrength;
+    settings.flipX = g_materialCreatorFlipX;
+    settings.flipY = g_materialCreatorFlipY;
+    settings.fullZRange = g_materialCreatorFullZRange;
+    settings.heightChannel = g_materialCreatorNormalHeightChannel;
+    settings.invertHeight = g_materialCreatorNormalInvertHeight;
+    settings.sharpness = g_materialCreatorNormalSharpness;
+    settings.mipmaps = g_materialCreatorNormalMipmaps;
+    settings.blackPoint = g_materialCreatorNormalBlackPoint;
+    settings.whitePoint = g_materialCreatorNormalWhitePoint;
+    settings.smoothing = g_materialCreatorNormalSmoothing;
+    settings.gradientFilter = g_materialCreatorNormalFilter;
+    settings.tileEdges = g_materialCreatorNormalTileEdges;
+    return settings;
+}
+
+GlossMapSettings GetCreatorGlossSettings() {
+    GlossMapSettings settings;
+    settings.contrast = g_materialCreatorGlossContrast;
+    settings.brightness = g_materialCreatorGlossBrightness;
+    settings.power = g_materialCreatorGlossPower;
+    settings.invert = g_materialCreatorGlossInvert;
+    settings.lowerThreshold = g_materialCreatorGlossLower;
+    settings.upperThreshold = g_materialCreatorGlossUpper;
+    settings.normalize = g_materialCreatorGlossNormalize;
+    settings.sharpness = g_materialCreatorGlossSharpness;
+    settings.mipmaps = g_materialCreatorGlossMipmaps;
+    settings.sourceMode = g_materialCreatorGlossSource;
+    settings.softness = g_materialCreatorGlossSoftness;
+    return settings;
+}
+
+BumpMapSettings GetCreatorBumpSettings() {
+    BumpMapSettings settings;
+    settings.heightChannel = g_creatorBumpHeightChannel;
+    settings.invert = g_creatorBumpInvert;
+    settings.contrast = g_creatorBumpContrast;
+    settings.brightness = g_creatorBumpBrightness;
+    settings.normalize = g_creatorBumpNormalize;
+    settings.sharpness = g_creatorBumpSharpness;
+    settings.mipmaps = g_creatorBumpMipmaps;
+    settings.blackPoint = g_creatorBumpBlackPoint;
+    settings.whitePoint = g_creatorBumpWhitePoint;
+    settings.gamma = g_creatorBumpGamma;
+    settings.smoothing = g_creatorBumpSmoothing;
+    settings.tileEdges = g_creatorBumpTileEdges;
+    return settings;
+}
+
 void GenerateCreatorNormalPreview() {
     if (g_materialCreatorDiffuse[0] == '\0') return;
     ReleaseCreatorPreview(g_creatorNormalPreview);
-    TexturePreviewInfo next = GenerateNormalMapPreviewTexture(g_materialCreatorDiffuse, g_materialCreatorNormalStrength, g_materialCreatorFlipX, g_materialCreatorFlipY, g_materialCreatorFullZRange, g_materialCreatorNormalHeightChannel, g_materialCreatorNormalInvertHeight, g_materialCreatorNormalSharpness, g_materialCreatorNormalMipmaps);
+    TexturePreviewInfo next = GenerateNormalMapPreviewTexture(g_materialCreatorDiffuse, GetCreatorNormalSettings());
     if (!next.valid || next.texture == 0) {
         ReleaseTexturePreview(next);
         return;
@@ -1751,7 +2008,7 @@ void GenerateCreatorNormalPreview() {
 void GenerateCreatorGlossPreview() {
     if (g_materialCreatorDiffuse[0] == '\0') return;
     ReleaseCreatorPreview(g_creatorGlossPreview);
-    TexturePreviewInfo next = GenerateGlossMapPreviewTexture(g_materialCreatorDiffuse, g_materialCreatorGlossContrast, g_materialCreatorGlossBrightness, g_materialCreatorGlossPower, g_materialCreatorGlossInvert, g_creatorGlossMetric, g_materialCreatorGlossLower, g_materialCreatorGlossUpper, g_materialCreatorGlossNormalize, g_materialCreatorGlossSharpness, g_materialCreatorGlossMipmaps);
+    TexturePreviewInfo next = GenerateGlossMapPreviewTexture(g_materialCreatorDiffuse, GetCreatorGlossSettings());
     if (!next.valid || next.texture == 0) {
         ReleaseTexturePreview(next);
         return;
@@ -1765,7 +2022,7 @@ void GenerateCreatorGlossPreview() {
 void GenerateCreatorBumpPreview() {
     if (g_materialCreatorDiffuse[0] == '\0') return;
     ReleaseCreatorPreview(g_creatorBumpPreview);
-    TexturePreviewInfo next = GenerateBumpMapPreviewTexture(g_materialCreatorDiffuse, g_creatorBumpHeightChannel, g_creatorBumpInvert, g_creatorBumpContrast, g_creatorBumpBrightness, g_creatorBumpNormalize, g_creatorBumpSharpness, g_creatorBumpMipmaps);
+    TexturePreviewInfo next = GenerateBumpMapPreviewTexture(g_materialCreatorDiffuse, GetCreatorBumpSettings());
     if (next.valid && next.texture != 0) g_creatorBumpPreview.info = next;
 }
 
@@ -1810,7 +2067,7 @@ void RequestCreatorSave(CreatorSaveKind kind) {
     g_creatorSaveHistoryIndex = 0;
     g_creatorFolderBrowsePath.clear();
     CreatorNavigateSaveFolder(start);
-    ImGui::OpenPopup("##CreatorSaveTexture");
+    ImGui::OpenPopup(Tr("##CreatorSaveTexture"));
 }
 
 bool SaveCreatorTextureNow(CreatorSaveKind kind, const fs::path& output, int format) {
@@ -1822,11 +2079,11 @@ bool SaveCreatorTextureNow(CreatorSaveKind kind, const fs::path& output, int for
     fs::remove(temp, ec);
     bool generated = false;
     if (kind == CreatorSaveKind::Normal) {
-        generated = GenerateNormalMapDDS(g_materialCreatorDiffuse, temp.string(), g_materialCreatorNormalStrength, g_materialCreatorFlipX, g_materialCreatorFlipY, g_materialCreatorFullZRange, g_materialCreatorNormalHeightChannel, g_materialCreatorNormalInvertHeight, g_materialCreatorNormalSharpness, g_materialCreatorNormalMipmaps, format);
+        generated = GenerateNormalMapDDS(g_materialCreatorDiffuse, temp.string(), GetCreatorNormalSettings(), format);
     } else if (kind == CreatorSaveKind::Gloss) {
-        generated = GenerateGlossMapDDS(g_materialCreatorDiffuse, temp.string(), g_materialCreatorGlossContrast, g_materialCreatorGlossBrightness, g_materialCreatorGlossPower, g_materialCreatorGlossInvert, g_creatorGlossMetric, g_materialCreatorGlossLower, g_materialCreatorGlossUpper, g_materialCreatorGlossNormalize, g_materialCreatorGlossSharpness, g_materialCreatorGlossMipmaps, format);
+        generated = GenerateGlossMapDDS(g_materialCreatorDiffuse, temp.string(), GetCreatorGlossSettings(), format);
     } else {
-        generated = GenerateBumpMapDDS(g_materialCreatorDiffuse, temp.string(), g_creatorBumpHeightChannel, g_creatorBumpInvert, g_creatorBumpContrast, g_creatorBumpBrightness, g_creatorBumpNormalize, g_creatorBumpSharpness, g_creatorBumpMipmaps, format);
+        generated = GenerateBumpMapDDS(g_materialCreatorDiffuse, temp.string(), GetCreatorBumpSettings(), format);
     }
     if (!generated) { fs::remove(temp, ec); return false; }
     fs::remove(output, ec);
@@ -1839,7 +2096,7 @@ bool SaveCreatorTextureNow(CreatorSaveKind kind, const fs::path& output, int for
 void DrawCreatorReplacePopup() {
     if (g_creatorOpenReplacePopup) {
         g_creatorOpenReplacePopup = false;
-        ImGui::OpenPopup("##CreatorReplaceTexture");
+        ImGui::OpenPopup(Tr("##CreatorReplaceTexture"));
     }
     static ImVec2 lastViewportSize(0.0f, 0.0f);
     const ImVec2 viewportSize = ImGui::GetMainViewport()->Size;
@@ -1848,11 +2105,12 @@ void DrawCreatorReplacePopup() {
         lastViewportSize = viewportSize;
     }
     if (!BeginSpacedModal("##CreatorReplaceTexture", ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) return;
-    ImGui::Text("File already exists.");
-    ImGui::TextWrapped("%s", g_creatorPendingReplacePath.generic_string().c_str());
+    ImGui::Text(Tr("File already exists."));
+    ImGui::TextWrapped(Tr("%s"), g_creatorPendingReplacePath.generic_string().c_str());
     ImGui::Spacing();
-    if (ImGui::Button("REPLACE", ImVec2(140.0f, 32.0f))) {
+    if (ImGui::Button(Tr("REPLACE"), ImVec2(140.0f, 32.0f))) {
         if (SaveCreatorTextureNow(g_creatorPendingReplaceKind, g_creatorPendingReplacePath, g_creatorPendingReplaceFormat)) {
+            ReleasePreviewForPath(g_creatorPendingReplacePath);
             const std::string savedName = g_creatorPendingReplacePath.filename().string();
             if (g_creatorPendingReplaceKind == CreatorSaveKind::Normal) {
                 std::snprintf(g_materialCreatorNormalName, sizeof(g_materialCreatorNormalName), "%s", savedName.c_str());
@@ -1873,7 +2131,7 @@ void DrawCreatorReplacePopup() {
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("CANCEL", ImVec2(110.0f, 32.0f))) {
+    if (ImGui::Button(Tr("CANCEL"), ImVec2(110.0f, 32.0f))) {
         g_creatorPendingReplaceKind = CreatorSaveKind::None;
         g_creatorPendingReplaceFormat = 0;
         g_creatorPendingReplacePath.clear();
@@ -1891,28 +2149,28 @@ void DrawCreatorSavePopup() {
         ImGui::SetNextWindowPos(viewportCenter, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         lastViewportSize = viewportSize;
     }
-    if (!ImGui::BeginPopupModal("##CreatorSaveTexture", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) return;
+    if (!ImGui::BeginPopupModal(Tr("##CreatorSaveTexture"), nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) return;
     ImGui::SetWindowSize(ImVec2(std::clamp(viewportSize.x - 40.0f, 720.0f, 1000.0f), std::clamp(viewportSize.y - 40.0f, 460.0f, 680.0f)), ImGuiCond_Always);
     const ImVec2 content = ImGui::GetContentRegionAvail();
     const float topHeight = 48.0f;
 
-    ImGui::BeginChild("##CreatorSaveTop", ImVec2(0.0f, topHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild(Tr("##CreatorSaveTop"), ImVec2(0.0f, topHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 4.0f));
     const float topPad = 8.0f;
     const float cancelWidth = 86.0f;
     const float saveWidth = 86.0f;
     ImGui::SetCursorPosX(topPad);
-    if (ImGui::Button("CANCEL", ImVec2(cancelWidth, 34.0f))) {
+    if (ImGui::Button(Tr("CANCEL"), ImVec2(cancelWidth, 34.0f))) {
         g_creatorSaveKind = CreatorSaveKind::None;
         ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    const float titleWidth = ImGui::CalcTextSize("SAVE TEXTURE").x;
+    const float titleWidth = ImGui::CalcTextSize(Tr("SAVE TEXTURE")).x;
     ImGui::SetCursorPosX(std::max(topPad + cancelWidth + 8.0f, (ImGui::GetWindowWidth() - titleWidth) * 0.5f));
-    ImGui::TextUnformatted("SAVE TEXTURE");
+    ImGui::TextUnformatted(Tr("SAVE TEXTURE"));
     ImGui::SameLine();
     ImGui::SetCursorPosX(ImGui::GetWindowWidth() - topPad - saveWidth);
-    const bool savePressed = ImGui::Button("SAVE", ImVec2(saveWidth, 34.0f));
+    const bool savePressed = ImGui::Button(Tr("SAVE"), ImVec2(saveWidth, 34.0f));
     ImGui::PopStyleVar();
     ImGui::EndChild();
     ImGui::Separator();
@@ -1921,35 +2179,35 @@ void DrawCreatorSavePopup() {
     const float bodyHeight = std::max(220.0f, content.y - topHeight - bottomHeight - 2.0f);
     const float sideWidth = std::clamp(ImGui::GetWindowWidth() * 0.20f, 160.0f, 210.0f);
 
-    ImGui::BeginChild("##CreatorSaveBody", ImVec2(0.0f, bodyHeight), false);
-    ImGui::BeginChild("##CreatorSaveSidebar", ImVec2(sideWidth, 0.0f), true);
-    ImGui::TextDisabled("PLACES");
+    ImGui::BeginChild(Tr("##CreatorSaveBody"), ImVec2(0.0f, bodyHeight), false);
+    ImGui::BeginChild(Tr("##CreatorSaveSidebar"), ImVec2(sideWidth, 0.0f), true);
+    ImGui::TextDisabled(Tr("PLACES"));
     ImGui::Spacing();
-    if (ImGui::Selectable("GAME ROOT", g_creatorFolderBrowsePath == gameRootPath)) CreatorNavigateSaveFolder(gameRootPath);
-    if (ImGui::Selectable("TEXTURES", false)) CreatorNavigateSaveFolder(gameRootPath / "textures");
+    if (ImGui::Selectable(Tr("GAME ROOT"), g_creatorFolderBrowsePath == gameRootPath)) CreatorNavigateSaveFolder(gameRootPath);
+    if (ImGui::Selectable(Tr("TEXTURES"), false)) CreatorNavigateSaveFolder(gameRootPath / "textures");
     ImGui::EndChild();
 
     ImGui::SameLine();
-    ImGui::BeginChild("##CreatorSaveFiles", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild(Tr("##CreatorSaveFiles"), ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-    ImGui::BeginChild("##CreatorSaveLocation", ImVec2(0.0f, 40.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild(Tr("##CreatorSaveLocation"), ImVec2(0.0f, 40.0f), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const bool canBack = !g_creatorSaveHistory.empty() && g_creatorSaveHistoryIndex > 0;
     const bool canForward = !g_creatorSaveHistory.empty() && g_creatorSaveHistoryIndex + 1 < g_creatorSaveHistory.size();
     if (!canBack) ImGui::BeginDisabled();
-    if (ImGui::Button("<", ImVec2(26.0f, 30.0f)) && canBack) {
+    if (ImGui::Button(Tr("<"), ImVec2(26.0f, 30.0f)) && canBack) {
         --g_creatorSaveHistoryIndex;
         g_creatorFolderBrowsePath = g_creatorSaveHistory[g_creatorSaveHistoryIndex];
     }
     if (!canBack) ImGui::EndDisabled();
     ImGui::SameLine();
     if (!canForward) ImGui::BeginDisabled();
-    if (ImGui::Button(">", ImVec2(26.0f, 30.0f)) && canForward) {
+    if (ImGui::Button(Tr(">"), ImVec2(26.0f, 30.0f)) && canForward) {
         ++g_creatorSaveHistoryIndex;
         g_creatorFolderBrowsePath = g_creatorSaveHistory[g_creatorSaveHistoryIndex];
     }
     if (!canForward) ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("^", ImVec2(26.0f, 30.0f))) {
+    if (ImGui::Button(Tr("^"), ImVec2(26.0f, 30.0f))) {
         const fs::path parent = g_creatorFolderBrowsePath.parent_path();
         if (!parent.empty()) CreatorNavigateSaveFolder(parent);
     }
@@ -1958,14 +2216,14 @@ void DrawCreatorSavePopup() {
     static char location[512] = {};
     const std::string locationText = CreatorRelativePath(g_creatorFolderBrowsePath);
     if (std::strcmp(location, locationText.c_str()) != 0) std::snprintf(location, sizeof(location), "%s", locationText.c_str());
-    if (ImGui::InputText("##CreatorSaveLocation", location, sizeof(location), ImGuiInputTextFlags_EnterReturnsTrue)) {
+    if (ImGui::InputText(Tr("##CreatorSaveLocation"), location, sizeof(location), ImGuiInputTextFlags_EnterReturnsTrue)) {
         fs::path target = fs::path(location);
         if (target.is_relative()) target = gameRootPath / target;
         CreatorNavigateSaveFolder(target);
     }
     ImGui::EndChild();
 
-    ImGui::BeginChild("##CreatorSaveFileList", ImVec2(0.0f, 0.0f), true);
+    ImGui::BeginChild(Tr("##CreatorSaveFileList"), ImVec2(0.0f, 0.0f), true);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
     std::vector<fs::path> folders;
     std::vector<fs::path> files;
@@ -1983,7 +2241,7 @@ void DrawCreatorSavePopup() {
     std::sort(files.begin(), files.end(), [](const fs::path& a, const fs::path& b) { return ToLower(a.filename().string()) < ToLower(b.filename().string()); });
 
     for (const fs::path& folder : folders) {
-        const std::string label = "FOLDER  " + folder.filename().string() + "##" + folder.generic_string();
+        const std::string label = std::string(Tr("FOLDER")) + "  " + folder.filename().string() + "##" + folder.generic_string();
         DrawBrowserSelectable(label.c_str(), false);
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) CreatorNavigateSaveFolder(folder);
     }
@@ -2003,17 +2261,17 @@ void DrawCreatorSavePopup() {
         if (DrawDeleteXButton("##DeleteSaveFile", rowTextY)) RequestCreatorDeleteTexture(file);
         ImGui::PopID();
     }
-    if (folders.empty() && files.empty()) ImGui::TextDisabled("THIS FOLDER IS EMPTY");
+    if (folders.empty() && files.empty()) ImGui::TextDisabled(Tr("THIS FOLDER IS EMPTY"));
     ImGui::PopStyleVar();
     ImGui::EndChild();
     ImGui::EndChild();
     ImGui::EndChild();
 
-    ImGui::BeginChild("##CreatorSaveBottom", ImVec2(0.0f, bottomHeight), false);
+    ImGui::BeginChild(Tr("##CreatorSaveBottom"), ImVec2(0.0f, bottomHeight), false);
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 2.0f);
-    ImGui::TextDisabled("FILE NAME");
+    ImGui::TextDisabled(Tr("FILE NAME"));
     ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputText("##CreatorSaveName", g_creatorSaveName, sizeof(g_creatorSaveName));
+    ImGui::InputText(Tr("##CreatorSaveName"), g_creatorSaveName, sizeof(g_creatorSaveName));
     if (savePressed) {
         std::string fileName = g_creatorSaveName;
         if (fileName.empty()) fileName = "new_texture.dds";
@@ -2021,7 +2279,7 @@ void DrawCreatorSavePopup() {
         if (ToLower(output.extension().string()) != ".dds") output += ".dds";
         output = output.lexically_normal();
         if (!CreatorPathInsideGame(output)) {
-            ImGui::OpenPopup("##CreatorSavePathError");
+            ImGui::OpenPopup(Tr("##CreatorSavePathError"));
         } else {
             std::error_code existsEc;
             const bool exists = fs::exists(output, existsEc);
@@ -2032,6 +2290,7 @@ void DrawCreatorSavePopup() {
                 g_creatorOpenReplacePopup = true;
                 ImGui::CloseCurrentPopup();
             } else if (SaveCreatorTextureNow(g_creatorSaveKind, output, g_creatorSaveFormat)) {
+                ReleasePreviewForPath(output);
                 const std::string savedName = output.filename().string();
                 if (g_creatorSaveKind == CreatorSaveKind::Normal) {
                     std::snprintf(g_materialCreatorNormalName, sizeof(g_materialCreatorNormalName), "%s", savedName.c_str());
@@ -2051,9 +2310,9 @@ void DrawCreatorSavePopup() {
     }
     ImGui::EndChild();
 
-    if (ImGui::BeginPopupModal("##CreatorSavePathError", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("The selected folder must be inside the game root.");
-        if (ImGui::Button("OK", ImVec2(100.0f, 30.0f))) ImGui::CloseCurrentPopup();
+    if (ImGui::BeginPopupModal(Tr("##CreatorSavePathError"), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped(Tr("The selected folder must be inside the game root."));
+        if (ImGui::Button(Tr("OK"), ImVec2(100.0f, 30.0f))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 
@@ -2065,6 +2324,11 @@ void ResetCreatorNormalSettings() {
     g_materialCreatorNormalSharpness = 0.0f;
     g_materialCreatorNormalHeightChannel = 0;
     g_materialCreatorNormalInvertHeight = false;
+    g_materialCreatorNormalBlackPoint = 0.0f;
+    g_materialCreatorNormalWhitePoint = 1.0f;
+    g_materialCreatorNormalSmoothing = 0.0f;
+    g_materialCreatorNormalFilter = 0;
+    g_materialCreatorNormalTileEdges = false;
     g_materialCreatorFlipX = false;
     g_materialCreatorFlipY = true;
     g_materialCreatorFullZRange = false;
@@ -2074,7 +2338,6 @@ void ResetCreatorNormalSettings() {
 }
 
 void ResetCreatorGlossSettings() {
-    g_creatorGlossMetric = 0;
     g_materialCreatorGlossSharpness = 0.0f;
     g_materialCreatorGlossContrast = 1.0f;
     g_materialCreatorGlossBrightness = 0.0f;
@@ -2083,6 +2346,8 @@ void ResetCreatorGlossSettings() {
     g_materialCreatorGlossLower = 0.0f;
     g_materialCreatorGlossUpper = 1.0f;
     g_materialCreatorGlossNormalize = true;
+    g_materialCreatorGlossSource = 0;
+    g_materialCreatorGlossSoftness = 0.0f;
     g_materialCreatorGlossMipmaps = true;
     g_materialCreatorGlossFormat = 0;
     GenerateCreatorGlossPreview();
@@ -2095,6 +2360,11 @@ void ResetCreatorBumpSettings() {
     g_creatorBumpContrast = 1.0f;
     g_creatorBumpBrightness = 0.0f;
     g_creatorBumpNormalize = false;
+    g_creatorBumpBlackPoint = 0.0f;
+    g_creatorBumpWhitePoint = 1.0f;
+    g_creatorBumpGamma = 1.0f;
+    g_creatorBumpSmoothing = 0.0f;
+    g_creatorBumpTileEdges = false;
     g_creatorBumpMipmaps = true;
     g_creatorBumpFormat = 0;
     GenerateCreatorBumpPreview();
@@ -2105,101 +2375,143 @@ void DrawMaterialCreator(int display_w, int display_h, EditorConfig& editorCfg) 
     (void)display_h;
     (void)editorCfg;
 
-    ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "TEXTURE GENERATOR");
+    ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr("TEXTURE GENERATOR"));
     ImGui::Spacing();
 
     static int creatorTab = 0;
-    if (ImGui::BeginTabBar("##CreatorTabs")) {
-        if (ImGui::BeginTabItem("NORMAL MAP")) {
+    if (ImGui::BeginTabBar(Tr("##CreatorTabs"))) {
+        if (ImGui::BeginTabItem(Tr("NORMAL MAP"))) {
             creatorTab = 0;
-            ImGui::BeginChild("##NormalCreatorBody", ImVec2(0.0f, -38.0f), false);
+            ImGui::BeginChild(Tr("##NormalCreatorBody"), ImVec2(0.0f, -38.0f), false);
             const float gap = ImGui::GetStyle().ItemSpacing.x;
-            const float width = ImGui::GetContentRegionAvail().x;
-            const float previewWidth = std::max(220.0f, std::min(520.0f, width * 0.56f));
-            ImGui::BeginChild("##NormalPreviewPanel", ImVec2(previewWidth, 0.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            const CreatorPanelsLayout layout = GetCreatorPanelsLayout();
+            ImGui::BeginChild(Tr("##NormalPreviewPanel"), ImVec2(layout.previewWidth, layout.previewHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             DrawCreatorImagePreview("NORMAL PREVIEW", g_creatorNormalPreview);
             ImGui::EndChild();
-            ImGui::SameLine(0.0f, gap);
-            ImGui::BeginChild("##NormalControls", ImVec2(0.0f, 0.0f), true);
-            if (CreatorSlider("Strength", &g_materialCreatorNormalStrength, 0.0f, 8.0f, "Normal intensity.")) GenerateCreatorNormalPreview();
-            if (CreatorSlider("Sharpness", &g_materialCreatorNormalSharpness, 0.0f, 4.0f, "Sharpens the diffuse before generating the normal map.")) GenerateCreatorNormalPreview();
-            const char* heightChannels[] = { "Luminance", "Red", "Green", "Blue", "Alpha" };
-            if (ImGui::Combo("Height source", &g_materialCreatorNormalHeightChannel, heightChannels, 5)) GenerateCreatorNormalPreview();
-            if (DrawCheckbox("Invert height", &g_materialCreatorNormalInvertHeight)) GenerateCreatorNormalPreview();
-            if (DrawCheckbox("Flip X", &g_materialCreatorFlipX)) GenerateCreatorNormalPreview();
-            if (DrawCheckbox("Flip Y", &g_materialCreatorFlipY)) GenerateCreatorNormalPreview();
-            if (DrawCheckbox("Full Z Range", &g_materialCreatorFullZRange)) GenerateCreatorNormalPreview();
-            if (DrawCheckbox("Generate mipmaps", &g_materialCreatorNormalMipmaps)) GenerateCreatorNormalPreview();
-            const char* normalFormats[] = { "BC5", "BC7" };
-            ImGui::Combo("Format", &g_materialCreatorNormalFormat, normalFormats, 2);
-            if (ImGui::Button("RESET SETTINGS", ImVec2(-1.0f, 0.0f))) ResetCreatorNormalSettings();
+            if (!layout.stacked) ImGui::SameLine(0.0f, gap);
+            ImGui::BeginChild(Tr("##NormalControls"), ImVec2(0.0f, 0.0f), true);
+            if (CreatorGridBegin("##NormalSettingsGrid")) {
+                const char* heightChannels[] = { "Luminance", "Red", "Green", "Blue", "Alpha" };
+                const char* filters[] = { "Sobel", "Central difference", "Scharr" };
+                const char* normalFormats[] = { "BC5", "BC7" };
+                CreatorGridSection("HEIGHT INPUT");
+                if (CreatorGridCombo("Height channel", &g_materialCreatorNormalHeightChannel, heightChannels, 5, "Select which source channel is interpreted as height. Luminance combines RGB.")) GenerateCreatorNormalPreview();
+                if (CreatorGridCheckbox("Invert height", &g_materialCreatorNormalInvertHeight, "Swap raised and recessed areas before calculating normals.")) GenerateCreatorNormalPreview();
+                if (CreatorGridSlider("Black point", &g_materialCreatorNormalBlackPoint, 0.0f, 1.0f, "Source values at or below this level become the minimum height.")) {
+                    if (g_materialCreatorNormalBlackPoint > g_materialCreatorNormalWhitePoint) g_materialCreatorNormalWhitePoint = g_materialCreatorNormalBlackPoint;
+                    GenerateCreatorNormalPreview();
+                }
+                if (CreatorGridSlider("White point", &g_materialCreatorNormalWhitePoint, 0.0f, 1.0f, "Source values at or above this level become the maximum height.")) {
+                    if (g_materialCreatorNormalWhitePoint < g_materialCreatorNormalBlackPoint) g_materialCreatorNormalBlackPoint = g_materialCreatorNormalWhitePoint;
+                    GenerateCreatorNormalPreview();
+                }
+                if (CreatorGridSlider("Smoothing", &g_materialCreatorNormalSmoothing, 0.0f, 1.0f, "Blend toward a Gaussian blur before calculating normals to reduce speckle.")) GenerateCreatorNormalPreview();
+                if (CreatorGridSlider("Sharpening", &g_materialCreatorNormalSharpness, 0.0f, 4.0f, "Increase local source contrast before deriving height; this can amplify noise.")) GenerateCreatorNormalPreview();
+                CreatorGridSection("NORMAL SETTINGS");
+                if (CreatorGridSlider("Strength", &g_materialCreatorNormalStrength, 0.0f, 8.0f, "Controls how strongly height changes tilt the surface. Zero produces a flat normal map.")) GenerateCreatorNormalPreview();
+                if (CreatorGridCombo("Gradient filter", &g_materialCreatorNormalFilter, filters, 3, "Choose how neighboring height samples are converted into X/Y surface slopes.")) GenerateCreatorNormalPreview();
+                if (CreatorGridCheckbox("Wrap edges", &g_materialCreatorNormalTileEdges, "Wrap sampling across image borders to avoid seams on repeating textures.")) GenerateCreatorNormalPreview();
+                if (CreatorGridCheckbox("Flip X", &g_materialCreatorFlipX, "Reverse the red-channel direction to match the model tangent-space convention.")) GenerateCreatorNormalPreview();
+                if (CreatorGridCheckbox("Flip Y", &g_materialCreatorFlipY, "Reverse the green-channel direction; commonly needed for OpenGL/DirectX convention changes.")) GenerateCreatorNormalPreview();
+                if (CreatorGridCheckbox("Full-range Z", &g_materialCreatorFullZRange, "Change blue-channel encoding; leave off for the usual remapped normal encoding.")) GenerateCreatorNormalPreview();
+                CreatorGridSection("OUTPUT");
+                if (CreatorGridCheckbox("Mipmaps", &g_materialCreatorNormalMipmaps, "Write smaller filtered levels for distant or minified surfaces.")) GenerateCreatorNormalPreview();
+                if (CreatorGridCombo("DDS format", &g_materialCreatorNormalFormat, normalFormats, 2, "BC5 stores two tangent-space directions efficiently; BC7 also retains the blue channel.")) GenerateCreatorNormalPreview();
+                CreatorGridEnd();
+            }
+            if (ImGui::Button(Tr("RESET SETTINGS"), ImVec2(-1.0f, 0.0f))) ResetCreatorNormalSettings();
             ImGui::EndChild();
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("GLOSS MAP")) {
+        if (ImGui::BeginTabItem(Tr("GLOSS MAP"))) {
             creatorTab = 1;
-            ImGui::BeginChild("##GlossCreatorBody", ImVec2(0.0f, -38.0f), false);
+            ImGui::BeginChild(Tr("##GlossCreatorBody"), ImVec2(0.0f, -38.0f), false);
             const float gap = ImGui::GetStyle().ItemSpacing.x;
-            const float width = ImGui::GetContentRegionAvail().x;
-            const float previewWidth = std::max(220.0f, std::min(520.0f, width * 0.56f));
-            ImGui::BeginChild("##GlossPreviewPanel", ImVec2(previewWidth, 0.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            const CreatorPanelsLayout layout = GetCreatorPanelsLayout();
+            ImGui::BeginChild(Tr("##GlossPreviewPanel"), ImVec2(layout.previewWidth, layout.previewHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             DrawCreatorImagePreview("GLOSS PREVIEW", g_creatorGlossPreview);
             ImGui::EndChild();
-            ImGui::SameLine(0.0f, gap);
-            ImGui::BeginChild("##GlossControls", ImVec2(0.0f, 0.0f), true);
-            const char* metrics[] = { "Manhattan", "Chebyshev", "Euclidean" };
-            if (ImGui::Combo("Criteria", &g_creatorGlossMetric, metrics, 3)) GenerateCreatorGlossPreview();
-            if (CreatorSlider("Lower threshold", &g_materialCreatorGlossLower, 0.0f, 1.0f, "Lower bound of the selected color-distance range.")) GenerateCreatorGlossPreview();
-            if (CreatorSlider("Upper threshold", &g_materialCreatorGlossUpper, 0.0f, 1.0f, "Upper bound of the selected color-distance range.")) GenerateCreatorGlossPreview();
-            if (g_materialCreatorGlossUpper < g_materialCreatorGlossLower) g_materialCreatorGlossUpper = g_materialCreatorGlossLower;
-            if (DrawCheckbox("Normalize", &g_materialCreatorGlossNormalize)) GenerateCreatorGlossPreview();
-            if (CreatorSlider("Contrast", &g_materialCreatorGlossContrast, 0.0f, 4.0f, "Contrast of the generated gloss values.")) GenerateCreatorGlossPreview();
-            if (CreatorSlider("Brightness", &g_materialCreatorGlossBrightness, -1.0f, 1.0f, "Brightness offset.")) GenerateCreatorGlossPreview();
-            if (CreatorSlider("Power", &g_materialCreatorGlossPower, 0.05f, 8.0f, "Response curve.")) GenerateCreatorGlossPreview();
-            if (CreatorSlider("Sharpness", &g_materialCreatorGlossSharpness, 0.0f, 4.0f, "Sharpens the diffuse before generating the gloss map.")) GenerateCreatorGlossPreview();
-            if (DrawCheckbox("Invert", &g_materialCreatorGlossInvert)) GenerateCreatorGlossPreview();
-            if (DrawCheckbox("Generate mipmaps", &g_materialCreatorGlossMipmaps)) GenerateCreatorGlossPreview();
-            const char* glossFormats[] = { "BC4", "BC7" };
-            ImGui::Combo("Format", &g_materialCreatorGlossFormat, glossFormats, 2);
-            if (ImGui::Button("RESET SETTINGS", ImVec2(-1.0f, 0.0f))) ResetCreatorGlossSettings();
+            if (!layout.stacked) ImGui::SameLine(0.0f, gap);
+            ImGui::BeginChild(Tr("##GlossControls"), ImVec2(0.0f, 0.0f), true);
+            if (CreatorGridBegin("##GlossSettingsGrid")) {
+                const char* glossSources[] = { "Luminance", "Red channel", "Green channel", "Blue channel", "Alpha channel" };
+                const char* glossFormats[] = { "BC4", "BC7" };
+                CreatorGridSection("SOURCE");
+                if (CreatorGridCombo("Gloss source", &g_materialCreatorGlossSource, glossSources, 5, "Choose luminance or a source channel to use as the gloss mask.")) GenerateCreatorGlossPreview();
+                if (CreatorGridSlider("Minimum level", &g_materialCreatorGlossLower, 0.0f, 1.0f, "Values below this become black when normalization is enabled.")) {
+                    if (g_materialCreatorGlossLower > g_materialCreatorGlossUpper) g_materialCreatorGlossUpper = g_materialCreatorGlossLower;
+                    GenerateCreatorGlossPreview();
+                }
+                if (CreatorGridSlider("Maximum level", &g_materialCreatorGlossUpper, 0.0f, 1.0f, "Values above this become white when normalization is enabled.")) {
+                    if (g_materialCreatorGlossUpper < g_materialCreatorGlossLower) g_materialCreatorGlossLower = g_materialCreatorGlossUpper;
+                    GenerateCreatorGlossPreview();
+                }
+                if (CreatorGridCheckbox("Normalize range", &g_materialCreatorGlossNormalize, "Stretch the selected minimum/maximum range across the full gloss range.")) GenerateCreatorGlossPreview();
+                if (CreatorGridSlider("Softness", &g_materialCreatorGlossSoftness, 0.0f, 1.0f, "Blend the linear response toward smoothstep.")) GenerateCreatorGlossPreview();
+                CreatorGridSection("ADJUSTMENTS");
+                if (CreatorGridSlider("Contrast", &g_materialCreatorGlossContrast, 0.0f, 4.0f, "Expand or compress values around middle gray.")) GenerateCreatorGlossPreview();
+                if (CreatorGridSlider("Brightness", &g_materialCreatorGlossBrightness, -1.0f, 1.0f, "Add or subtract a constant from every gloss value.")) GenerateCreatorGlossPreview();
+                if (CreatorGridSlider("Gamma", &g_materialCreatorGlossPower, 0.05f, 8.0f, "Below 1 brightens midtones; above 1 darkens them.")) GenerateCreatorGlossPreview();
+                if (CreatorGridSlider("Sharpening", &g_materialCreatorGlossSharpness, 0.0f, 4.0f, "Increase local source contrast before extracting gloss; this can amplify noise.")) GenerateCreatorGlossPreview();
+                if (CreatorGridCheckbox("Invert mask", &g_materialCreatorGlossInvert, "Swap matte and glossy regions after extracting the selected source.")) GenerateCreatorGlossPreview();
+                CreatorGridSection("OUTPUT");
+                if (CreatorGridCheckbox("Mipmaps", &g_materialCreatorGlossMipmaps, "Write smaller filtered levels for distant or minified surfaces.")) GenerateCreatorGlossPreview();
+                if (CreatorGridCombo("DDS format", &g_materialCreatorGlossFormat, glossFormats, 2, "BC4 is compact for a single-channel gloss mask; BC7 stores it in RGBA.")) GenerateCreatorGlossPreview();
+                CreatorGridEnd();
+            }
+            if (ImGui::Button(Tr("RESET SETTINGS"), ImVec2(-1.0f, 0.0f))) ResetCreatorGlossSettings();
             ImGui::EndChild();
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("BUMP MAP")) {
+        if (ImGui::BeginTabItem(Tr("BUMP MAP"))) {
             creatorTab = 2;
-            ImGui::BeginChild("##BumpCreatorBody", ImVec2(0.0f, -38.0f), false);
+            ImGui::BeginChild(Tr("##BumpCreatorBody"), ImVec2(0.0f, -38.0f), false);
             const float gap = ImGui::GetStyle().ItemSpacing.x;
-            const float width = ImGui::GetContentRegionAvail().x;
-            const float previewWidth = std::max(220.0f, std::min(520.0f, width * 0.56f));
-            ImGui::BeginChild("##BumpPreviewPanel", ImVec2(previewWidth, 0.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            const CreatorPanelsLayout layout = GetCreatorPanelsLayout();
+            ImGui::BeginChild(Tr("##BumpPreviewPanel"), ImVec2(layout.previewWidth, layout.previewHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             DrawCreatorImagePreview("BUMP PREVIEW", g_creatorBumpPreview);
             ImGui::EndChild();
-            ImGui::SameLine(0.0f, gap);
-            ImGui::BeginChild("##BumpControls", ImVec2(0.0f, 0.0f), true);
-            const char* heightChannels[] = { "Luminance", "Red (PrimeXT)", "Green", "Blue", "Alpha" };
-            if (ImGui::Combo("Height source", &g_creatorBumpHeightChannel, heightChannels, 5)) GenerateCreatorBumpPreview();
-            ShowTooltip("PrimeXT samples the red channel of _hmap directly. Red (PrimeXT) preserves those height values without conversion.");
-            if (DrawCheckbox("Invert height", &g_creatorBumpInvert)) GenerateCreatorBumpPreview();
-            if (CreatorSlider("Contrast", &g_creatorBumpContrast, 0.0f, 4.0f, "Contrast of the generated height map.")) GenerateCreatorBumpPreview();
-            if (CreatorSlider("Brightness", &g_creatorBumpBrightness, -1.0f, 1.0f, "Brightness offset.")) GenerateCreatorBumpPreview();
-            if (CreatorSlider("Sharpness", &g_creatorBumpSharpness, 0.0f, 4.0f, "Sharpens the diffuse before generating the bump map.")) GenerateCreatorBumpPreview();
-            if (DrawCheckbox("Normalize", &g_creatorBumpNormalize)) GenerateCreatorBumpPreview();
-            ShowTooltip("Disabled by default for PrimeXT compatibility. Normalization remaps the source range and changes the authored height values.");
-            if (DrawCheckbox("Generate mipmaps", &g_creatorBumpMipmaps)) GenerateCreatorBumpPreview();
-            const char* bumpFormats[] = { "BC4", "BC7" };
-            ImGui::Combo("Format", &g_creatorBumpFormat, bumpFormats, 2);
-            if (ImGui::Button("RESET SETTINGS", ImVec2(-1.0f, 0.0f))) ResetCreatorBumpSettings();
+            if (!layout.stacked) ImGui::SameLine(0.0f, gap);
+            ImGui::BeginChild(Tr("##BumpControls"), ImVec2(0.0f, 0.0f), true);
+            if (CreatorGridBegin("##BumpSettingsGrid")) {
+                const char* heightChannels[] = { "Luminance", "Red (PrimeXT)", "Green", "Blue", "Alpha" };
+                const char* bumpFormats[] = { "BC4", "BC7" };
+                CreatorGridSection("HEIGHT INPUT");
+                if (CreatorGridCombo("Height channel", &g_creatorBumpHeightChannel, heightChannels, 5, "PrimeXT reads _hmap from its red channel. Select another channel only if the source stores height elsewhere.")) GenerateCreatorBumpPreview();
+                if (CreatorGridCheckbox("Invert height", &g_creatorBumpInvert, "Swap raised and recessed areas.")) GenerateCreatorBumpPreview();
+                if (CreatorGridSlider("Black point", &g_creatorBumpBlackPoint, 0.0f, 1.0f, "Source values at or below this level become the minimum height.")) {
+                    if (g_creatorBumpBlackPoint > g_creatorBumpWhitePoint) g_creatorBumpWhitePoint = g_creatorBumpBlackPoint;
+                    GenerateCreatorBumpPreview();
+                }
+                if (CreatorGridSlider("White point", &g_creatorBumpWhitePoint, 0.0f, 1.0f, "Source values at or above this level become the maximum height.")) {
+                    if (g_creatorBumpWhitePoint < g_creatorBumpBlackPoint) g_creatorBumpBlackPoint = g_creatorBumpWhitePoint;
+                    GenerateCreatorBumpPreview();
+                }
+                if (CreatorGridSlider("Gamma", &g_creatorBumpGamma, 0.1f, 4.0f, "Adjust the distribution of height values after level remapping. 1.0 leaves it unchanged.")) GenerateCreatorBumpPreview();
+                if (CreatorGridSlider("Smoothing", &g_creatorBumpSmoothing, 0.0f, 1.0f, "Blend toward a Gaussian blur to reduce small height variations.")) GenerateCreatorBumpPreview();
+                if (CreatorGridSlider("Sharpening", &g_creatorBumpSharpness, 0.0f, 4.0f, "Increase local source contrast before extracting height; this can amplify noise.")) GenerateCreatorBumpPreview();
+                CreatorGridSection("ADJUSTMENTS");
+                if (CreatorGridSlider("Contrast", &g_creatorBumpContrast, 0.0f, 4.0f, "Expand or compress heights around middle gray.")) GenerateCreatorBumpPreview();
+                if (CreatorGridSlider("Brightness", &g_creatorBumpBrightness, -1.0f, 1.0f, "Raise or lower the whole height range.")) GenerateCreatorBumpPreview();
+                if (CreatorGridCheckbox("Normalize", &g_creatorBumpNormalize, "Stretch the remaining range to black and white. Off preserves authored PrimeXT _hmap values.")) GenerateCreatorBumpPreview();
+                if (CreatorGridCheckbox("Wrap edges", &g_creatorBumpTileEdges, "Wrap the smoothing filter across image borders for repeating textures.")) GenerateCreatorBumpPreview();
+                CreatorGridSection("OUTPUT");
+                if (CreatorGridCheckbox("Mipmaps", &g_creatorBumpMipmaps, "Write smaller filtered levels for distant or minified surfaces.")) GenerateCreatorBumpPreview();
+                if (CreatorGridCombo("DDS format", &g_creatorBumpFormat, bumpFormats, 2, "BC4 is compact for single-channel height; BC7 stores gray values in RGBA.")) GenerateCreatorBumpPreview();
+                CreatorGridEnd();
+            }
+            if (ImGui::Button(Tr("RESET SETTINGS"), ImVec2(-1.0f, 0.0f))) ResetCreatorBumpSettings();
             ImGui::EndChild();
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
     }
-    if (ImGui::Button("SAVE TEXTURE", ImVec2(-1.0f, 34.0f))) {
+    if (ImGui::Button(Tr("SAVE TEXTURE"), ImVec2(-1.0f, 34.0f))) {
         RequestCreatorSave(creatorTab == 0 ? CreatorSaveKind::Normal : (creatorTab == 1 ? CreatorSaveKind::Gloss : CreatorSaveKind::Bump));
     }
 
@@ -2229,23 +2541,23 @@ void DrawEditorPanels(
     float* lightColor,
     std::function<void(std::string&, int&)> refreshDataFunc
 ) {
-    if (ImGui::BeginTabBar("EditorTabs", ImGuiTabBarFlags_None)) {
-        if (ImGui::BeginTabItem("Visual Materials (.mat)")) {
+    if (ImGui::BeginTabBar(Tr("EditorTabs"), ImGuiTabBarFlags_None)) {
+        if (ImGui::BeginTabItem(Tr("Visual Materials (.mat)"))) {
             const float availWidth = ImGui::GetContentRegionAvail().x;
             const float panelHeight = std::max(220.0f, ImGui::GetContentRegionAvail().y - 4.0f);
             const float colGap = ImGui::GetStyle().ItemSpacing.x;
             const float colWidth = std::max(180.0f, (availWidth - colGap * 2.0f) / 3.0f);
 
-            ImGui::BeginChild("MatFilesChild", ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "MAT FILE");
+            ImGui::BeginChild(Tr("MatFilesChild"), ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr("MAT FILE"));
 
             static char matFileFilter[128] = {};
             std::string matFilePreview = currentFileName;
             if (matFilePreview.empty()) matFilePreview = "SELECT .MAT FILE";
             ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::BeginCombo("##MatFileSelect", matFilePreview.c_str())) {
+            if (ImGui::BeginCombo(Tr("##MatFileSelect"), matFilePreview.c_str())) {
                 ImGui::SetNextItemWidth(-1.0f);
-                ImGui::InputTextWithHint("##MatFileFilter", "Search .mat files...", matFileFilter, sizeof(matFileFilter));
+                ImGui::InputTextWithHint(Tr("##MatFileFilter"), Tr("Search .mat files..."), matFileFilter, sizeof(matFileFilter));
                 const std::string matFilter = ToLower(matFileFilter);
                 bool hasFilteredFiles = false;
                 for (const std::string& file : matFiles) {
@@ -2253,24 +2565,25 @@ void DrawEditorPanels(
                     hasFilteredFiles = true;
                     ImGui::PushID(file.c_str());
                     if (ImGui::Selectable(file.c_str(), currentFileName == file)) {
-                        SelectMat(file, materials, currentMatIndex, currentFileName);
+                        SelectMat(file, materials, currentMatIndex, currentFileName,
+                                  editorCfg.autoAssignMaterialTextures);
                         editorCfg.lastMatFile = currentFileName;
                         matFileFilter[0] = '\0';
                     }
                     ImGui::PopID();
                 }
-                if (!hasFilteredFiles) ImGui::TextDisabled("NO .MAT FILES FOUND");
+                if (!hasFilteredFiles) ImGui::TextDisabled(Tr("NO .MAT FILES FOUND"));
                 ImGui::EndCombo();
             }
 
             if (!matFiles.empty() && currentFileName != "None") {
-                if (ImGui::Button("+ NEW MATERIAL", ImVec2(-1.0f, 0.0f))) g_openNewMaterialPopup = true;
+                if (ImGui::Button(Tr("+ NEW MATERIAL"), ImVec2(-1.0f, 0.0f))) g_openNewMaterialPopup = true;
             }
 
             ImGui::Separator();
 
             if (!materials.empty() && currentMatIndex >= 0 && static_cast<size_t>(currentMatIndex) < materials.size()) {
-                ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "MATERIAL");
+                ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr("MATERIAL"));
                 static char materialSearch[128] = {};
                 std::string materialPreviewName = materials[currentMatIndex].name;
                 const std::string previewExtension = ToLower(fs::path(materialPreviewName).extension().string());
@@ -2278,9 +2591,9 @@ void DrawEditorPanels(
                     materialPreviewName = fs::path(materialPreviewName).stem().string();
                 }
                 ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::BeginCombo("##MaterialSelect", materialPreviewName.c_str())) {
+                if (ImGui::BeginCombo(Tr("##MaterialSelect"), materialPreviewName.c_str())) {
                     ImGui::SetNextItemWidth(-1.0f);
-                    ImGui::InputTextWithHint("##MaterialSearch", "Search material...", materialSearch, sizeof(materialSearch));
+                    ImGui::InputTextWithHint(Tr("##MaterialSearch"), Tr("Search material..."), materialSearch, sizeof(materialSearch));
                     const std::string materialFilter = ToLower(materialSearch);
                     std::vector<size_t> materialOrder(materials.size());
                     std::iota(materialOrder.begin(), materialOrder.end(), 0);
@@ -2305,11 +2618,11 @@ void DrawEditorPanels(
                         }
                         ImGui::PopID();
                     }
-                    if (!hasFilteredMaterials) ImGui::TextDisabled("NO MATERIALS FOUND");
+                    if (!hasFilteredMaterials) ImGui::TextDisabled(Tr("NO MATERIALS FOUND"));
                     ImGui::EndCombo();
                 }
 
-                ImGui::TextDisabled("MATERIAL NAME");
+                ImGui::TextDisabled(Tr("MATERIAL NAME"));
                 static char materialNameBuffer[256] = {};
                 static std::string materialNameBufferSource;
                 if (materialNameBufferSource != materials[currentMatIndex].name) {
@@ -2317,80 +2630,93 @@ void DrawEditorPanels(
                     std::snprintf(materialNameBuffer, sizeof(materialNameBuffer), "%s", materials[currentMatIndex].name.c_str());
                 }
                 ImGui::SetNextItemWidth(-1.0f);
-                if (ImGui::InputText("##MaterialName", materialNameBuffer, sizeof(materialNameBuffer))) {
+                if (ImGui::InputText(Tr("##MaterialName"), materialNameBuffer, sizeof(materialNameBuffer))) {
                     std::string newName = materialNameBuffer;
                     if (!newName.empty() && newName != materials[currentMatIndex].name) {
                         materials[currentMatIndex].name = newName;
                         materialNameBufferSource = newName;
-                        SaveAllMaterials(currentFileName, materials);
+                        SaveMaterialsAndRefreshText(currentFileName, materials);
                     }
                 }
 
                 Material& mat = materials[currentMatIndex];
                 bool textureFieldsChanged = false;
                 ImGui::Dummy(ImVec2(0.0f, 2.0f));
-                if (ImGui::BeginTable("##TextureFields", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
+                if (ImGui::BeginTable(Tr("##TextureFields"), 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
                     ImGui::TableNextColumn();
-                    textureFieldsChanged |= DrawResettableInput("diffuse", "Diffuse", mat.diffusePath, sizeof(mat.diffusePath), mat.diffuseVisible);
+                    textureFieldsChanged |= DrawResettableInput("diffuse", Tr("Diffuse"), mat.diffusePath, sizeof(mat.diffusePath), mat.diffuseVisible);
                     ImGui::TableNextColumn();
-                    textureFieldsChanged |= DrawResettableInput("normal", "Normal", mat.normalPath, sizeof(mat.normalPath), mat.normalVisible);
+                    textureFieldsChanged |= DrawResettableInput("normal", Tr("Normal"), mat.normalPath, sizeof(mat.normalPath), mat.normalVisible);
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
-                    textureFieldsChanged |= DrawResettableInput("gloss", "Gloss", mat.glossPath, sizeof(mat.glossPath), mat.glossVisible);
+                    textureFieldsChanged |= DrawResettableInput("gloss", Tr("Gloss"), mat.glossPath, sizeof(mat.glossPath), mat.glossVisible);
                     ImGui::TableNextColumn();
-                    textureFieldsChanged |= DrawResettableInput("luma", "Luma", mat.lumaPath, sizeof(mat.lumaPath), mat.lumaVisible);
+                    textureFieldsChanged |= DrawResettableInput("luma", Tr("Luma"), mat.lumaPath, sizeof(mat.lumaPath), mat.lumaVisible);
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
-                    textureFieldsChanged |= DrawResettableInput("bump", "Bump", mat.bumpPath, sizeof(mat.bumpPath), mat.bumpVisible);
+                    textureFieldsChanged |= DrawResettableInput("bump", Tr("Bump"), mat.bumpPath, sizeof(mat.bumpPath), mat.bumpVisible);
                     ImGui::TableNextColumn();
-                    textureFieldsChanged |= DrawResettableInput("detail", "Detail", mat.detailPath, sizeof(mat.detailPath), mat.detailVisible);
+                    textureFieldsChanged |= DrawResettableInput("detail", Tr("Detail"), mat.detailPath, sizeof(mat.detailPath), mat.detailVisible);
                     ImGui::EndTable();
                 }
                 if (textureFieldsChanged) {
                     mat.syncParams();
                     mat.loadTextures();
-                    SaveAllMaterials(currentFileName, materials);
+                    SaveMaterialsAndRefreshText(currentFileName, materials);
                 }
             }
             ImGui::EndChild();
 
             ImGui::SameLine();
-            ImGui::BeginChild("MatParamsChild", ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
-            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "Parameters & Model");
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 3.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 2.0f));
+            ImGui::BeginChild(Tr("MatParamsChild"), ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
+            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr("Parameters & Model"));
             if (!materials.empty() && currentMatIndex >= 0 && static_cast<size_t>(currentMatIndex) < materials.size()) {
                 Material& mat = materials[currentMatIndex];
                 bool materialParamsChanged = false;
-                materialParamsChanged |= ImGui::SliderFloat("Smoothness", &mat.smoothness, 0.0f, 1.0f);
-                materialParamsChanged |= ImGui::SliderFloat("Reflect", &mat.reflectScale, 0.0f, 1.0f);
-                materialParamsChanged |= ImGui::SliderFloat("Relief", &mat.reliefScale, 0.0f, 1.0f);
-                materialParamsChanged |= ImGui::SliderFloat("Refract", &mat.refractScale, 0.0f, 1.0f);
-                materialParamsChanged |= ImGui::SliderFloat("Abberation", &mat.aberrationScale, 0.0f, 1.0f);
-                ImGui::TextUnformatted("Texture Tiling");
+                if (ImGui::BeginTable("##MaterialParametersGrid", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
+                    ImGui::TableNextColumn();
+                    materialParamsChanged |= ImGui::SliderFloat(Tr("Smoothness"), &mat.smoothness, 0.0f, 1.0f);
+                    ImGui::TableNextColumn();
+                    materialParamsChanged |= ImGui::SliderFloat(Tr("Reflect"), &mat.reflectScale, 0.0f, 1.0f);
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    materialParamsChanged |= ImGui::SliderFloat(Tr("Relief"), &mat.reliefScale, 0.0f, 1.0f);
+                    ImGui::TableNextColumn();
+                    materialParamsChanged |= ImGui::SliderFloat(Tr("Refract"), &mat.refractScale, 0.0f, 1.0f);
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    materialParamsChanged |= ImGui::SliderFloat(Tr("Abberation"), &mat.aberrationScale, 0.0f, 1.0f);
+                    ImGui::EndTable();
+                }
+                ImGui::TextUnformatted(Tr("Texture Tiling"));
                 static bool symmetricTiling = false;
-                if (DrawCheckbox("Symmetric", &symmetricTiling)) {
+                if (DrawCheckbox(Tr("Symmetric"), &symmetricTiling)) {
                     if (symmetricTiling) mat.textureScaleY = mat.textureScaleX;
                     materialParamsChanged = true;
                 }
                 if (symmetricTiling) {
-                    materialParamsChanged |= ImGui::DragFloat("##TextureTilingSymmetric", &mat.textureScaleX, 0.1f, 0.1f, 64.0f, "%.2f");
+                    materialParamsChanged |= ImGui::DragFloat(Tr("##TextureTilingSymmetric"), &mat.textureScaleX, 0.1f, 0.1f, 64.0f, "%.2f");
                     mat.textureScaleY = mat.textureScaleX;
                 } else {
-                    materialParamsChanged |= ImGui::DragFloat2("##TextureTiling", &mat.textureScaleX, 0.1f, 0.1f, 64.0f, "%.2f");
+                    materialParamsChanged |= ImGui::DragFloat2(Tr("##TextureTiling"), &mat.textureScaleX, 0.1f, 0.1f, 64.0f, "%.2f");
                 }
                 mat.textureScaleX = std::clamp(mat.textureScaleX, 0.1f, 64.0f);
                 mat.textureScaleY = std::clamp(mat.textureScaleY, 0.1f, 64.0f);
                 std::vector<const char*> physMatPtrs;
                 for (const auto& s : physicalMaterialTypes) physMatPtrs.push_back(s.c_str());
-                if (!physMatPtrs.empty() && ImGui::Combo("Phys Material", &mat.matTypeIndex, physMatPtrs.data(), static_cast<int>(physMatPtrs.size()))) {
+                if (!physMatPtrs.empty() && ImGui::Combo(Tr("Phys Material"), &mat.matTypeIndex, physMatPtrs.data(), static_cast<int>(physMatPtrs.size()))) {
                     if (mat.matTypeIndex >= 0 && static_cast<size_t>(mat.matTypeIndex) < physicalMaterialTypes.size()) {
                         for (auto& p : mat.params) if (p.first == "material") p.second = physicalMaterialTypes[mat.matTypeIndex];
                     }
                 }
-                if (ImGui::Button("Apply Changes")) {
+                if (ImGui::Button(Tr("Apply Changes"))) {
                     materialParamsChanged = true;
                     mat.syncParams();
                     mat.loadTextures();
                 }
+                ImGui::SameLine();
                 if (materialParamsChanged) {
                     mat.smoothness = std::clamp(mat.smoothness, 0.0f, 1.0f);
                     mat.reflectScale = std::max(mat.reflectScale, 0.0f);
@@ -2398,49 +2724,54 @@ void DrawEditorPanels(
                     mat.refractScale = std::max(mat.refractScale, 0.0f);
                     mat.aberrationScale = std::max(mat.aberrationScale, 0.0f);
                     mat.syncParams();
-                    SaveAllMaterials(currentFileName, materials);
+                    SaveMaterialsAndRefreshText(currentFileName, materials);
                 }
-                ImGui::SameLine();
-                if (ImGui::Button("Save All")) {
+                if (ImGui::Button(Tr("Save All"))) {
                     mat.syncParams();
-                    SaveAllMaterials(currentFileName, materials);
+                    SaveMaterialsAndRefreshText(currentFileName, materials);
                 }
             }
             ImGui::Separator();
-            DrawCheckbox("Show Model", &modelVisible);
-            ImGui::Combo("Model Shape", &shapeType, "Cube\0Sphere\0Plane\0Cylinder\0Cone\0Torus\0Newell Teapot\0");
+            const char* modelShapeItems[] = {
+                Tr("Cube"), Tr("Sphere"), Tr("Plane"), Tr("Cylinder"),
+                Tr("Cone"), Tr("Torus"), Tr("Newell Teapot")
+            };
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::Combo(Tr("Model Shape"), &shapeType, modelShapeItems, static_cast<int>(std::size(modelShapeItems)));
             ImGui::EndChild();
+            ImGui::PopStyleVar(2);
 
             ImGui::SameLine();
-            ImGui::BeginChild("MatLightChild", ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
-            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "Lighting & Maps");
-            DrawCheckbox("Normal Map", &useNormal);
-            DrawCheckbox("Gloss Map", &useGloss);
-            DrawCheckbox("Luma Map", &useLuma);
-            DrawCheckbox("Use Bump", &useBump);
-            ImGui::Combo("Light Mode", &lightMode, "Camera\0Fixed\0Dynamic\0");
+            ImGui::BeginChild(Tr("MatLightChild"), ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
+            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr("Lighting & Maps"));
+            DrawCheckbox(Tr("Normal Map"), &useNormal);
+            DrawCheckbox(Tr("Gloss Map"), &useGloss);
+            DrawCheckbox(Tr("Luma Map"), &useLuma);
+            DrawCheckbox(Tr("Use Bump"), &useBump);
+            const char* lightModeItems[] = {Tr("Camera"), Tr("Fixed"), Tr("Dynamic")};
+            ImGui::Combo(Tr("Light Mode"), &lightMode, lightModeItems, static_cast<int>(std::size(lightModeItems)));
             if (lightMode == 2) {
-                ImGui::SliderFloat("Dynamic Speed", &editorCfg.dynamicLightSpeed, 0.1f, 5.0f);
-                ImGui::SliderFloat("Dynamic Radius", &editorCfg.dynamicLightRadius, 1.0f, 6.0f);
+                ImGui::SliderFloat(Tr("Dynamic Speed"), &editorCfg.dynamicLightSpeed, 0.1f, 5.0f);
+                ImGui::SliderFloat(Tr("Dynamic Radius"), &editorCfg.dynamicLightRadius, 1.0f, 6.0f);
             }
             const float intensityMax = editorCfg.allowHighLightIntensity ? 25.0f : 5.0f;
-            ImGui::SliderFloat("Intensity", &lightIntensity, 0.0f, intensityMax);
+            ImGui::SliderFloat(Tr("Intensity"), &lightIntensity, 0.0f, intensityMax);
             lightIntensity = std::clamp(lightIntensity, 0.0f, intensityMax);
-            ImGui::ColorEdit3("Color", lightColor);
+            ImGui::ColorEdit3(Tr("Color"), lightColor);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Physical Materials (.def)")) {
+        if (ImGui::BeginTabItem(Tr("Physical Materials (.def)"))) {
             const float availWidth = ImGui::GetContentRegionAvail().x;
             const float panelHeight = std::max(220.0f, ImGui::GetContentRegionAvail().y - 4.0f);
             const float colGap = ImGui::GetStyle().ItemSpacing.x;
             const float colWidth = std::max(220.0f, (availWidth - colGap) * 0.5f);
 
-            ImGui::BeginChild("DefListChild", ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
-            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "Physical Material Entries");
+            ImGui::BeginChild(Tr("DefListChild"), ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
+            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr("Physical Material Entries"));
             if (!physicalMaterials.empty() && currentPhysMatIndex >= 0 && static_cast<size_t>(currentPhysMatIndex) < physicalMaterials.size()) {
-                if (ImGui::BeginCombo("Select Physical Material", physicalMaterials[currentPhysMatIndex].name.c_str())) {
+                if (ImGui::BeginCombo(Tr("Select Physical Material"), physicalMaterials[currentPhysMatIndex].name.c_str())) {
                     for (size_t n = 0; n < physicalMaterials.size(); ++n) {
                         if (ImGui::Selectable(physicalMaterials[n].name.c_str(), currentPhysMatIndex == static_cast<int>(n))) {
                             currentPhysMatIndex = static_cast<int>(n);
@@ -2456,8 +2787,8 @@ void DrawEditorPanels(
                     defNameBuf[sizeof(defNameBuf) - 1] = '\0';
                     lastDefIndex = currentPhysMatIndex;
                 }
-                if (ImGui::InputText("Material Name", defNameBuf, sizeof(defNameBuf))) physicalMaterials[currentPhysMatIndex].name = defNameBuf;
-                if (ImGui::Button("Add New Def Entry")) {
+                if (ImGui::InputText(Tr("Material Name"), defNameBuf, sizeof(defNameBuf))) physicalMaterials[currentPhysMatIndex].name = defNameBuf;
+                if (ImGui::Button(Tr("Add New Def Entry"))) {
                     PhysicalMaterialEntry newEntry;
                     newEntry.name = "new_material_type";
                     newEntry.multiParams["impact_decal"] = {"shot"};
@@ -2466,8 +2797,8 @@ void DrawEditorPanels(
                     currentPhysMatIndex = static_cast<int>(physicalMaterials.size()) - 1;
                 }
             } else {
-                ImGui::TextDisabled("No physical materials loaded");
-                if (ImGui::Button("Load / Create Default")) {
+                ImGui::TextDisabled(Tr("No physical materials loaded"));
+                if (ImGui::Button(Tr("Load / Create Default"))) {
                     fs::path defPath = gameRootPath / "scripts" / "materials.def";
                     if (!fs::exists(defPath)) defPath = gameRootPath / "materials.def";
                     LoadAllPhysicalMaterials(defPath.string(), physicalMaterials);
@@ -2485,17 +2816,17 @@ void DrawEditorPanels(
             ImGui::EndChild();
 
             ImGui::SameLine();
-            ImGui::BeginChild("DefParamsChild", ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
-            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "Parameters Editor");
+            ImGui::BeginChild(Tr("DefParamsChild"), ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
+            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr("Parameters Editor"));
             if (!physicalMaterials.empty() && currentPhysMatIndex >= 0 && static_cast<size_t>(currentPhysMatIndex) < physicalMaterials.size()) {
                 PhysicalMaterialEntry& pMat = physicalMaterials[currentPhysMatIndex];
-                ImGui::InputText("Impact Decal", pMat.impactDecal, sizeof(pMat.impactDecal));
-                ImGui::InputText("Impact Parts", pMat.impactPartsBuf, sizeof(pMat.impactPartsBuf));
-                ImGui::InputText("Impact Sound", pMat.impactSoundBuf, sizeof(pMat.impactSoundBuf));
-                ImGui::InputText("Step Sound", pMat.stepSoundBuf, sizeof(pMat.stepSoundBuf));
-                if (ImGui::Button("Apply Def Changes")) pMat.syncParams();
+                ImGui::InputText(Tr("Impact Decal"), pMat.impactDecal, sizeof(pMat.impactDecal));
+                ImGui::InputText(Tr("Impact Parts"), pMat.impactPartsBuf, sizeof(pMat.impactPartsBuf));
+                ImGui::InputText(Tr("Impact Sound"), pMat.impactSoundBuf, sizeof(pMat.impactSoundBuf));
+                ImGui::InputText(Tr("Step Sound"), pMat.stepSoundBuf, sizeof(pMat.stepSoundBuf));
+                if (ImGui::Button(Tr("Apply Def Changes"))) pMat.syncParams();
                 ImGui::SameLine();
-                if (ImGui::Button("Save materials.def")) {
+                if (ImGui::Button(Tr("Save materials.def"))) {
                     pMat.syncParams();
                     fs::path defPath = gameRootPath / "scripts" / "materials.def";
                     if (!fs::exists(defPath.parent_path())) fs::create_directories(defPath.parent_path());
@@ -2575,7 +2906,7 @@ void DrawEditorUI(
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(5.0f, 5.0f));
     ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
     ImGui::SetNextWindowSize(ImVec2(width, height));
-    ImGui::Begin("##MatEditLayout", nullptr,
+    ImGui::Begin(Tr("##MatEditLayout"), nullptr,
         ImGuiWindowFlags_NoDecoration |
         ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoResize |
@@ -2585,43 +2916,43 @@ void DrawEditorUI(
         ImGuiWindowFlags_MenuBar);
 
     if (ImGui::BeginMenuBar()) {
-        if (ImGui::BeginMenu("Project")) {
-            if (ImGui::MenuItem("Load All WADs")) {
+        if (ImGui::BeginMenu(Tr("Project"))) {
+            if (ImGui::MenuItem(Tr("Load All WADs"))) {
                 ScanAndLoadAllWads();
                 SaveWads(editorCfg);
                 ReleasePreview();
             }
-            if (ImGui::MenuItem("Reload Saved WADs")) {
+            if (ImGui::MenuItem(Tr("Reload Saved WADs"))) {
                 LoadWadArchives(editorCfg.loadedWads);
                 ReleasePreview();
             }
-            if (ImGui::MenuItem("Clear Loaded WADs")) {
+            if (ImGui::MenuItem(Tr("Clear Loaded WADs"))) {
                 ClearWadArchives();
                 editorCfg.loadedWads.clear();
                 SaveConfig(editorCfg);
                 ReleasePreview();
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Auto-Gen")) EnterMaterialCreator(materials, currentMatIndex, currentFileName);
-            if (ImGui::MenuItem("Quick Create .MAT")) g_showMatCreator = true;
-            if (ImGui::MenuItem("Quick Create .DEF")) g_showDefCreator = true;
+            if (ImGui::MenuItem(Tr("Auto-Gen"))) EnterMaterialCreator(materials, currentMatIndex, currentFileName);
+            if (ImGui::MenuItem(Tr("Quick Create .MAT"))) g_showMatCreator = true;
+            if (ImGui::MenuItem(Tr("Quick Create .DEF"))) g_showDefCreator = true;
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Settings")) {
-            if (ImGui::MenuItem("Open Settings")) g_showSettings = true;
+        if (ImGui::BeginMenu(Tr("Settings"))) {
+            if (ImGui::MenuItem(Tr("Open Settings"))) g_showSettings = true;
             ImGui::Separator();
-            if (ImGui::BeginMenu("Panels")) {
-                ImGui::MenuItem("File Browser", nullptr, &g_showBrowser);
-                ImGui::MenuItem("Texture Preview", nullptr, &g_showTexturePreview);
-                ImGui::MenuItem("Material Editor", nullptr, &g_showMaterialEditor);
+            if (ImGui::BeginMenu(Tr("Panels"))) {
+                ImGui::MenuItem(Tr("File Browser"), nullptr, &g_showBrowser);
+                ImGui::MenuItem(Tr("Texture Preview"), nullptr, &g_showTexturePreview);
+                ImGui::MenuItem(Tr("Material Editor"), nullptr, &g_showMaterialEditor);
                 ImGui::Separator();
-                if (ImGui::MenuItem("Show All Panels")) {
+                if (ImGui::MenuItem(Tr("Show All Panels"))) {
                     g_showBrowser = true;
                     g_showTexturePreview = true;
                     g_showMaterialEditor = true;
                 }
-                if (ImGui::MenuItem("Hide All Panels")) {
+                if (ImGui::MenuItem(Tr("Hide All Panels"))) {
                     g_showBrowser = false;
                     g_showTexturePreview = false;
                     g_showMaterialEditor = false;
@@ -2631,8 +2962,8 @@ void DrawEditorUI(
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Instruments")) {
-            if (ImGui::MenuItem("Reset Material View")) {
+        if (ImGui::BeginMenu(Tr("Instruments"))) {
+            if (ImGui::MenuItem(Tr("Reset Material View"))) {
                 shapeType = 0;
                 lightMode = 0;
                 useNormal = true;
@@ -2640,20 +2971,20 @@ void DrawEditorUI(
                 useLuma = true;
                 useBump = true;
             }
-            if (ImGui::MenuItem("Reset Lighting")) {
+            if (ImGui::MenuItem(Tr("Reset Lighting"))) {
                 lightMode = 0;
                 lightIntensity = 1.0f;
                 lightColor[0] = 1.0f;
                 lightColor[1] = 1.0f;
                 lightColor[2] = 1.0f;
             }
-            if (ImGui::MenuItem("Reload Current Material")) {
+            if (ImGui::MenuItem(Tr("Reload Current Material"))) {
                 if (!materials.empty() && currentMatIndex >= 0 && static_cast<size_t>(currentMatIndex) < materials.size()) {
                     materials[currentMatIndex].loadTextures();
                     ReleasePreview();
                 }
             }
-            if (ImGui::MenuItem("Clear Texture Assignments")) {
+            if (ImGui::MenuItem(Tr("Clear Texture Assignments"))) {
                 if (!materials.empty() && currentMatIndex >= 0 && static_cast<size_t>(currentMatIndex) < materials.size()) {
                     Material& mat = materials[currentMatIndex];
                     mat.diffusePath[0] = '\0';
@@ -2669,15 +3000,15 @@ void DrawEditorUI(
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Help")) {
-            if (ImGui::MenuItem("About MatEdit")) g_showAbout = true;
+        if (ImGui::BeginMenu(Tr("Help"))) {
+            if (ImGui::MenuItem(Tr("About MatEdit"))) g_showAbout = true;
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
     }
 
     if (leftVisible) {
-        ImGui::BeginChild("##BrowserColumn", ImVec2(leftWidth, 0.0f), false);
+        ImGui::BeginChild(Tr("##BrowserColumn"), ImVec2(leftWidth, 0.0f), false);
 
         if (g_materialCreator || g_showBrowser) {
             const float browserAvail = ImGui::GetContentRegionAvail().y;
@@ -2693,11 +3024,11 @@ void DrawEditorUI(
             const float browserHeight = std::max(searchHeight + 1.0f,
                                                  browserAvail - previewHeight - (g_showTexturePreview ? itemSpacingY : 0.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ImGui::GetStyle().WindowPadding.x, 0.0f));
-            ImGui::BeginChild("##FileTree", ImVec2(0.0f, browserHeight), true);
+            ImGui::BeginChild(Tr("##FileTree"), ImVec2(0.0f, browserHeight), true);
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 0.0f));
             const float treeHeight = std::max(1.0f, ImGui::GetContentRegionAvail().y - searchHeight - 2.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(ImGui::GetStyle().WindowPadding.x, 2.0f));
-            ImGui::BeginChild("##FileTreeItems", ImVec2(0.0f, treeHeight), false);
+            ImGui::BeginChild(Tr("##FileTreeItems"), ImVec2(0.0f, treeHeight), false);
             const std::string creatorBrowserBefore = g_preview.reference;
             DrawDirectory(gameRootPath, std::string(g_searchBuffer), editorCfg, materials, physicalMaterials,
                           currentFileName, currentMatIndex, currentDefFile, currentPhysMatIndex);
@@ -2711,8 +3042,8 @@ void DrawEditorUI(
             ImGui::PopStyleVar();
             ImGui::Dummy(ImVec2(0.0f, searchPadding));
             ImGui::SetNextItemWidth(-1.0f);
-            ImGui::InputTextWithHint("##FileSearch", "Search files / WAD textures...", g_searchBuffer, sizeof(g_searchBuffer));
-            ShowTooltip("Searches game files, material files, model textures and loaded WAD textures. Type part of a name or path.");
+            ImGui::InputTextWithHint(Tr("##FileSearch"), Tr("Search files / WAD textures..."), g_searchBuffer, sizeof(g_searchBuffer));
+            ShowTooltip(Tr("Searches game files, material files, model textures and loaded WAD textures. Type part of a name or path."));
             ImGui::Dummy(ImVec2(0.0f, searchPadding));
             ImGui::PopStyleVar();
             ImGui::EndChild();
@@ -2720,12 +3051,9 @@ void DrawEditorUI(
         }
 
         if (g_showTexturePreview) {
-            const float previewHeight = g_showBrowser
-                ? std::max(1.0f, ImGui::GetContentRegionAvail().y - ImGui::GetStyle().ItemSpacing.y)
-                : ImGui::GetContentRegionAvail().y;
-            ImGui::BeginChild("##PreviewPanel", ImVec2(0.0f, previewHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::BeginChild(Tr("##PreviewPanel"), ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             Material* activeMaterial = (!materials.empty() && currentMatIndex >= 0 && static_cast<size_t>(currentMatIndex) < materials.size()) ? &materials[currentMatIndex] : nullptr;
-            DrawPreview(activeMaterial, leftWidth);
+            DrawPreview(activeMaterial, leftWidth, currentFileName, materials);
             ImGui::EndChild();
         }
         ImGui::EndChild();
@@ -2734,7 +3062,7 @@ void DrawEditorUI(
     if (leftVisible) ImGui::SameLine(0.0f, gap);
 
     const float rightWidth = std::max(100.0f, width - leftWidth - (leftVisible ? gap : 0.0f) - 10.0f);
-    ImGui::BeginChild("##RightLayout", ImVec2(rightWidth, 0.0f), true);
+    ImGui::BeginChild(Tr("##RightLayout"), ImVec2(rightWidth, 0.0f), true);
 
     static int topViewTab = 0;
     static std::vector<char> matTextBuffer;
@@ -2742,13 +3070,13 @@ void DrawEditorUI(
     static std::string loadedMatTextPath;
     static std::string loadedDefTextPath;
 
-    if (ImGui::Button("SCENE", ImVec2(76.0f, 26.0f))) { topViewTab = 0; if (g_materialCreator) LeaveMaterialCreator(); }
+    if (ImGui::Button(Tr("SCENE"), ImVec2(76.0f, 26.0f))) { topViewTab = 0; if (g_materialCreator) LeaveMaterialCreator(); }
     ImGui::SameLine(0.0f, 6.0f);
-    if (ImGui::Button("MAT", ImVec2(76.0f, 26.0f))) { topViewTab = 1; if (g_materialCreator) LeaveMaterialCreator(); }
+    if (ImGui::Button(Tr("MAT"), ImVec2(76.0f, 26.0f))) { topViewTab = 1; if (g_materialCreator) LeaveMaterialCreator(); }
     ImGui::SameLine(0.0f, 6.0f);
-    if (ImGui::Button("DEF", ImVec2(76.0f, 26.0f))) { topViewTab = 2; if (g_materialCreator) LeaveMaterialCreator(); }
+    if (ImGui::Button(Tr("DEF"), ImVec2(76.0f, 26.0f))) { topViewTab = 2; if (g_materialCreator) LeaveMaterialCreator(); }
     ImGui::SameLine(0.0f, 6.0f);
-    if (ImGui::Button("AUTO-GEN", ImVec2(108.0f, 26.0f))) {
+    if (ImGui::Button(Tr("AUTO-GEN"), ImVec2(108.0f, 26.0f))) {
         EnterMaterialCreator(materials, currentMatIndex, currentFileName);
         topViewTab = 3;
     }
@@ -2762,22 +3090,24 @@ void DrawEditorUI(
     const float centerHeight = std::max(80.0f, rightAvail - bottomHeight - (g_showMaterialEditor ? gap : 0.0f));
 
     if (topViewTab == 0) {
-        ImGui::BeginChild("##ViewportSpacer", ImVec2(0.0f, centerHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
+        ImGui::BeginChild(Tr("##ViewportSpacer"), ImVec2(0.0f, centerHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
         g_viewportPos = ImGui::GetWindowPos();
         g_viewportSize = ImGui::GetWindowSize();
         g_viewportDrawList = ImGui::GetWindowDrawList();
         g_viewportHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         ImGui::EndChild();
     } else {
-        ImGui::BeginChild("##TextDocument", ImVec2(0.0f, centerHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild(Tr("##TextDocument"), ImVec2(0.0f, centerHeight), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         if (topViewTab == 1) {
             DrawTextDocumentEditor("##MatTextEditor", ".MAT", currentFileName, matTextBuffer, loadedMatTextPath, matFiles,
                                 [&](const std::string& file) {
-                                    SelectMat(file, materials, currentMatIndex, currentFileName);
+                                    SelectMat(file, materials, currentMatIndex, currentFileName,
+                                              editorCfg.autoAssignMaterialTextures);
                                     editorCfg.lastMatFile = currentFileName;
                                 },
                                 [&]() {
-                                    ReloadMaterialsPreserveSelection(currentFileName, materials, currentMatIndex);
+                                    ReloadMaterialsPreserveSelection(currentFileName, materials, currentMatIndex,
+                                                                     editorCfg.autoAssignMaterialTextures);
                                 });
         } else {
             DrawTextDocumentEditor("##DefTextEditor", ".DEF", currentDefFile, defTextBuffer, loadedDefTextPath, defFiles,
@@ -2798,7 +3128,7 @@ void DrawEditorUI(
     }
 
     if (g_showMaterialEditor) {
-        ImGui::BeginChild("##EditorPanels", ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_None);
+        ImGui::BeginChild(Tr("##EditorPanels"), ImVec2(0.0f, 0.0f), true, ImGuiWindowFlags_None);
         DrawEditorPanels(display_w, display_h, editorCfg, materials, physicalMaterials, matFiles,
                             currentFileName, currentMatIndex, currentDefFile, currentPhysMatIndex,
                             shapeType, modelVisible, lightMode, useNormal, useGloss, useLuma, useBump,
@@ -2809,7 +3139,7 @@ void DrawEditorUI(
 
     ImGui::EndChild();
     DrawTextureDeletePopup();
-    DrawNewMaterialPopup(currentFileName, materials, currentMatIndex);
+    DrawNewMaterialPopup(currentFileName, materials, currentMatIndex, editorCfg);
 
     static char settingsGamePath[1024] = {};
     static bool settingsInitialized = false;
@@ -2821,33 +3151,33 @@ void DrawEditorUI(
     const ImVec2 mainCenter = ImGui::GetMainViewport()->GetCenter();
 
     if (g_showMatCreator) {
-        ImGui::OpenPopup("Quick Create .MAT");
+        ImGui::OpenPopup(Tr("Quick Create .MAT"));
         g_showMatCreator = false;
     }
     if (g_showDefCreator) {
-        ImGui::OpenPopup("Quick Create .DEF");
+        ImGui::OpenPopup(Tr("Quick Create .DEF"));
         g_showDefCreator = false;
     }
 
     ImGui::SetNextWindowPos(mainCenter, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Quick Create .MAT", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
-        ImGui::TextDisabled("Creates a PrimeXT texture material in scripts/*.mat.");
-        ImGui::InputTextWithHint("File", "materials.mat", g_newMatFile, sizeof(g_newMatFile));
-        ShowTooltip("MAT file name. The file is created inside scripts/. The .mat extension is added automatically if missing.");
-        ImGui::InputTextWithHint("Texture / model texture", "wall1 or model/body", g_newMatTexture, sizeof(g_newMatTexture));
-        ShowTooltip("Base texture name or model texture reference used by the material. Keep it identical to the texture name in the WAD or model.");
-        ImGui::TextDisabled("Tip: the texture name must match the WAD/model texture. Extra maps can use PrimeXT suffixes such as _norm and _gloss.");
+    if (ImGui::BeginPopupModal(Tr("Quick Create .MAT"), nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+        ImGui::TextDisabled(Tr("Creates a PrimeXT texture material in scripts/*.mat."));
+        ImGui::InputTextWithHint(Tr("File"), Tr("materials.mat"), g_newMatFile, sizeof(g_newMatFile));
+        ShowTooltip(Tr("MAT file name. The file is created inside scripts/. The .mat extension is added automatically if missing."));
+        ImGui::InputTextWithHint(Tr("Texture / model texture"), Tr("wall1 or model/body"), g_newMatTexture, sizeof(g_newMatTexture));
+        ShowTooltip(Tr("Base texture name or model texture reference used by the material. Keep it identical to the texture name in the WAD or model."));
+        ImGui::TextDisabled(Tr("Tip: the texture name must match the WAD/model texture. Extra maps can use PrimeXT suffixes such as _norm and _gloss."));
         const char* phys = physicalMaterialTypes.empty() ? "default" : physicalMaterialTypes[0].c_str();
         static int createMatPhysIndex = 0;
         std::vector<const char*> physPtrs;
         for (const auto& name : physicalMaterialTypes) physPtrs.push_back(name.c_str());
         if (!physPtrs.empty()) {
             createMatPhysIndex = std::clamp(createMatPhysIndex, 0, static_cast<int>(physPtrs.size()) - 1);
-            ImGui::Combo("Physical Material", &createMatPhysIndex, physPtrs.data(), static_cast<int>(physPtrs.size()));
-            ShowTooltip("Physical material type written to the MAT definition, such as concrete, wood or metal.");
+            ImGui::Combo(Tr("Physical Material"), &createMatPhysIndex, physPtrs.data(), static_cast<int>(physPtrs.size()));
+            ShowTooltip(Tr("Physical material type written to the MAT definition, such as concrete, wood or metal."));
             phys = physPtrs[createMatPhysIndex];
         }
-        if (ImGui::Button("Create & Open", ImVec2(130.0f, 0.0f))) {
+        if (ImGui::Button(Tr("Create & Open"), ImVec2(130.0f, 0.0f))) {
             std::string fileName = g_newMatFile;
             if (fileName.empty()) fileName = "materials.mat";
             if (ToLower(fs::path(fileName).extension().string()) != ".mat") fileName += ".mat";
@@ -2863,7 +3193,7 @@ void DrawEditorUI(
                 out.close();
                 const std::string relative = fs::relative(outPath, gameRootPath).generic_string();
                 std::vector<Material> createdMaterials;
-                if (LoadAllMaterials(relative, createdMaterials)) {
+                if (LoadAllMaterials(relative, createdMaterials, editorCfg.autoAssignMaterialTextures)) {
                     for (auto& material : materials) material.releaseTextures();
                     for (auto& material : createdMaterials) material.loadTextures();
                     materials = std::move(createdMaterials);
@@ -2876,24 +3206,24 @@ void DrawEditorUI(
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        if (ImGui::Button(Tr("Cancel"))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 
     ImGui::SetNextWindowPos(mainCenter, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Quick Create .DEF", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
-        ImGui::TextDisabled("Creates a PrimeXT physical-material definition in scripts/*.def.");
-        ImGui::InputTextWithHint("File", "materials.def", g_newDefFile, sizeof(g_newDefFile));
-        ImGui::InputTextWithHint("Material name", "concrete", g_newDefName, sizeof(g_newDefName));
-        ShowTooltip("Name of the physical material definition. This is the name used by the game when resolving the material type.");
-        ImGui::InputTextWithHint("Impact decal", "shot", g_newDefImpactDecal, sizeof(g_newDefImpactDecal));
-        ShowTooltip("Decal name used when a bullet or impact hits this material.");
-        ImGui::InputTextWithHint("Impact sounds", "materials/debris_concrete_01.wav materials/debris_concrete_02.wav", g_newDefImpactSound, sizeof(g_newDefImpactSound));
-        ShowTooltip("Space-separated impact sound paths. Up to 8 sounds are written to the DEF file.");
-        ImGui::InputTextWithHint("Step sounds", "materials/walk_concrete_01.wav materials/walk_concrete_02.wav", g_newDefStepSound, sizeof(g_newDefStepSound));
-        ShowTooltip("Space-separated footstep sound paths. Up to 8 sounds are written to the DEF file.");
-        ImGui::TextDisabled("Tip: sound paths are relative to sound/. Up to 8 impact/step sounds are supported.");
-        if (ImGui::Button("Create & Open", ImVec2(130.0f, 0.0f))) {
+    if (ImGui::BeginPopupModal(Tr("Quick Create .DEF"), nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+        ImGui::TextDisabled(Tr("Creates a PrimeXT physical-material definition in scripts/*.def."));
+        ImGui::InputTextWithHint(Tr("File"), Tr("materials.def"), g_newDefFile, sizeof(g_newDefFile));
+        ImGui::InputTextWithHint(Tr("Material name"), Tr("concrete"), g_newDefName, sizeof(g_newDefName));
+        ShowTooltip(Tr("Name of the physical material definition. This is the name used by the game when resolving the material type."));
+        ImGui::InputTextWithHint(Tr("Impact decal"), Tr("shot"), g_newDefImpactDecal, sizeof(g_newDefImpactDecal));
+        ShowTooltip(Tr("Decal name used when a bullet or impact hits this material."));
+        ImGui::InputTextWithHint(Tr("Impact sounds"), Tr("materials/debris_concrete_01.wav materials/debris_concrete_02.wav"), g_newDefImpactSound, sizeof(g_newDefImpactSound));
+        ShowTooltip(Tr("Space-separated impact sound paths. Up to 8 sounds are written to the DEF file."));
+        ImGui::InputTextWithHint(Tr("Step sounds"), Tr("materials/walk_concrete_01.wav materials/walk_concrete_02.wav"), g_newDefStepSound, sizeof(g_newDefStepSound));
+        ShowTooltip(Tr("Space-separated footstep sound paths. Up to 8 sounds are written to the DEF file."));
+        ImGui::TextDisabled(Tr("Tip: sound paths are relative to sound/. Up to 8 impact/step sounds are supported."));
+        if (ImGui::Button(Tr("Create & Open"), ImVec2(130.0f, 0.0f))) {
             std::string fileName = g_newDefFile;
             if (fileName.empty()) fileName = "materials.def";
             if (ToLower(fs::path(fileName).extension().string()) != ".def") fileName += ".def";
@@ -2929,7 +3259,7 @@ void DrawEditorUI(
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        if (ImGui::Button(Tr("Cancel"))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 
@@ -2945,7 +3275,7 @@ void DrawEditorUI(
             const fs::path envPath = gameRootPath / "gfx" / "env";
             std::error_code envError;
             if (!fs::is_directory(envPath, envError)) {
-                ImGui::TextDisabled("SKYBOX DIRECTORY NOT FOUND: gfx/env");
+                ImGui::TextDisabled(Tr("SKYBOX DIRECTORY NOT FOUND: gfx/env"));
             }
         }
 
@@ -2987,7 +3317,7 @@ void DrawEditorUI(
         ImGui::PushStyleColor(ImGuiCol_WindowBg, settingsBg);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, settingsChildBg);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
-        if (ImGui::Begin("Settings", &g_showSettings, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+        if (ImGui::Begin(Tr("Settings"), &g_showSettings, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
             const ImVec4 settingsFill = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
             const ImVec2 settingsPos = ImGui::GetWindowPos();
             const ImVec2 settingsMin = ImGui::GetWindowContentRegionMin();
@@ -2996,17 +3326,27 @@ void DrawEditorUI(
                 ImVec2(settingsPos.x + settingsMin.x, settingsPos.y + settingsMin.y),
                 ImVec2(settingsPos.x + settingsMax.x, settingsPos.y + settingsMax.y),
                 ImGui::ColorConvertFloat4ToU32(settingsFill));
-            if (ImGui::BeginTabBar("SettingsTabs")) {
-                if (ImGui::BeginTabItem("General")) {
-                    ImGui::BeginTable("GeneralGrid", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoBordersInBody | ImGuiTableFlags_PadOuterX);
+            if (ImGui::BeginTabBar(Tr("SettingsTabs"))) {
+                if (ImGui::BeginTabItem(Tr("General"))) {
+                    ImGui::BeginTable(Tr("GeneralGrid"), 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoBordersInBody | ImGuiTableFlags_PadOuterX);
                     ImGui::TableNextColumn();
-                    ImGui::TextUnformatted("Game Root");
+                    ImGui::TextUnformatted(Tr("Language"));
+                    const char* languageItems[] = {Tr("English"), Tr("Russian")};
+                    int languageIndex = editorCfg.language == "ru" ? 1 : 0;
+                    ImGui::SetNextItemWidth(-1.0f);
+                    if (ImGui::Combo(Tr("##Language"), &languageIndex, languageItems, 2)) {
+                        editorCfg.language = languageIndex == 1 ? "ru" : "en";
+                        SetLanguage(editorCfg.language);
+                        SaveConfig(editorCfg);
+                    }
+                    ImGui::Spacing();
+                    ImGui::TextUnformatted(Tr("Game Root"));
                     const float applyWidth = 58.0f;
                     const float rootWidth = std::max(80.0f, ImGui::GetContentRegionAvail().x - applyWidth - 6.0f);
                     ImGui::SetNextItemWidth(rootWidth);
-                    ImGui::InputText("##SettingsGameRoot", settingsGamePath, sizeof(settingsGamePath));
+                    ImGui::InputText(Tr("##SettingsGameRoot"), settingsGamePath, sizeof(settingsGamePath));
                     ImGui::SameLine(0.0f, 6.0f);
-                    if (ImGui::Button("Apply##GameRoot", ImVec2(applyWidth, 0.0f))) {
+                    if (ImGui::Button(Tr("Apply##GameRoot"), ImVec2(applyWidth, 0.0f))) {
                         fs::path newPath(settingsGamePath);
                         std::error_code ec;
                         newPath = fs::weakly_canonical(newPath, ec);
@@ -3021,60 +3361,61 @@ void DrawEditorUI(
                     }
 
                     ImGui::Spacing();
-                    ImGui::TextUnformatted("Anti-Aliasing");
+                    ImGui::TextUnformatted(Tr("Anti-Aliasing"));
                     bool fxaaChanged = false;
                     bool taaChanged = false;
                     bool msaaChanged = false;
-                    if (editorCfg.taaEnabled || editorCfg.msaaEnabled) ImGui::BeginDisabled();
-                    fxaaChanged = DrawCheckbox("FXAA", &editorCfg.fxaaEnabled);
-                    if (editorCfg.taaEnabled || editorCfg.msaaEnabled) ImGui::EndDisabled();
-                    if (editorCfg.fxaaEnabled || editorCfg.msaaEnabled) ImGui::BeginDisabled();
-                    taaChanged = DrawCheckbox("TAA", &editorCfg.taaEnabled);
-                    if (editorCfg.fxaaEnabled || editorCfg.msaaEnabled) ImGui::EndDisabled();
-                    if (editorCfg.fxaaEnabled || editorCfg.taaEnabled) ImGui::BeginDisabled();
-                    msaaChanged = DrawCheckbox("MSAA", &editorCfg.msaaEnabled);
-                    if (editorCfg.fxaaEnabled || editorCfg.taaEnabled) ImGui::EndDisabled();
+                    fxaaChanged = DrawCheckbox(Tr("FXAA"), &editorCfg.fxaaEnabled);
+                    taaChanged = DrawCheckbox(Tr("TAA"), &editorCfg.taaEnabled);
+                    msaaChanged = DrawCheckbox(Tr("MSAA"), &editorCfg.msaaEnabled);
                     if (fxaaChanged && editorCfg.fxaaEnabled) { editorCfg.taaEnabled = false; editorCfg.msaaEnabled = false; }
                     if (taaChanged && editorCfg.taaEnabled) { editorCfg.fxaaEnabled = false; editorCfg.msaaEnabled = false; }
                     if (msaaChanged && editorCfg.msaaEnabled) { editorCfg.fxaaEnabled = false; editorCfg.taaEnabled = false; }
-                    ImGui::TextUnformatted("MSAA Samples");
+                    ImGui::TextUnformatted(Tr("MSAA Samples"));
                     const char* sampleItems[] = { "2x", "4x", "8x" };
                     int sampleIndex = editorCfg.msaaSamples == 8 ? 2 : (editorCfg.msaaSamples == 2 ? 0 : 1);
                     ImGui::SetNextItemWidth(-1.0f);
-                    if (ImGui::Combo("##MSAASamples", &sampleIndex, sampleItems, 3)) {
+                    if (ImGui::Combo(Tr("##MSAASamples"), &sampleIndex, sampleItems, 3)) {
                         editorCfg.msaaSamples = sampleIndex == 0 ? 2 : (sampleIndex == 1 ? 4 : 8);
                     }
 
                     ImGui::Spacing();
-                    ImGui::TextUnformatted("Field of View");
+                    ImGui::TextUnformatted(Tr("Field of View"));
                     ImGui::SetNextItemWidth(-1.0f);
-                    if (ImGui::InputFloat("##FOV", &editorCfg.fov, 1.0f, 5.0f, "%.0f deg")) editorCfg.fov = std::clamp(editorCfg.fov, 60.0f, 120.0f);
+                    if (ImGui::InputFloat(Tr("##FOV"), &editorCfg.fov, 1.0f, 5.0f, "%.0f deg")) editorCfg.fov = std::clamp(editorCfg.fov, 60.0f, 120.0f);
 
                     ImGui::TableNextColumn();
-                    ImGui::TextUnformatted("Display");
-                    DrawCheckbox("Show FPS", &editorCfg.showFps);
-                    DrawCheckbox("Allow Light Intensity > 5", &editorCfg.allowHighLightIntensity);
+                    ImGui::TextUnformatted(Tr("Display"));
+                    DrawCheckbox(Tr("Show FPS"), &editorCfg.showFps);
+                    if (DrawCheckbox(Tr("VSync"), &editorCfg.vsyncEnabled)) {
+                        glfwSwapInterval(editorCfg.vsyncEnabled ? 1 : 0);
+                    }
+                    if (DrawCheckbox(Tr("Texture Filtering"), &editorCfg.textureFilteringEnabled)) {
+                        SetTextureFilteringEnabled(editorCfg.textureFilteringEnabled);
+                    }
+                    DrawCheckbox(Tr("Auto-assign material textures"), &editorCfg.autoAssignMaterialTextures);
+                    DrawCheckbox(Tr("Allow Light Intensity > 5"), &editorCfg.allowHighLightIntensity);
                     if (!editorCfg.allowHighLightIntensity) lightIntensity = std::clamp(lightIntensity, 0.0f, 5.0f);
 
                     ImGui::Spacing();
-                    ImGui::TextUnformatted("Viewport");
-                    DrawCheckbox("Unlimited Zoom In", &editorCfg.unlimitedZoom);
+                    ImGui::TextUnformatted(Tr("Viewport"));
+                    DrawCheckbox(Tr("Unlimited Zoom In"), &editorCfg.unlimitedZoom);
 
                     ImGui::Spacing();
-                    ImGui::TextUnformatted("WAD Loading");
-                    DrawCheckbox("Load all WAD files", &editorCfg.autoLoadWads);
+                    ImGui::TextUnformatted(Tr("WAD Loading"));
+                    DrawCheckbox(Tr("Load all WAD files"), &editorCfg.autoLoadWads);
                     ImGui::EndTable();
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Keybinds")) {
-                    ImGui::TextUnformatted("Controls");
-                    ImGui::BeginTable("KeybindGrid", 3, ImGuiTableFlags_SizingStretchSame);
+                if (ImGui::BeginTabItem(Tr("Keybinds"))) {
+                    ImGui::TextUnformatted(Tr("Controls"));
+                    ImGui::BeginTable(Tr("KeybindGrid"), 3, ImGuiTableFlags_SizingStretchSame);
                     const auto keyCell = [&](const char* label, int& key) {
                         ImGui::TableNextColumn();
                         ImGui::PushID(label);
-                        ImGui::TextUnformatted(label);
+                        ImGui::TextUnformatted(Tr(label));
                         const bool waiting = g_rebindingKey == &key;
-                        const std::string button = waiting ? "PRESS A KEY..." : std::string(KeyName(key));
+                        const std::string button = waiting ? Tr("PRESS A KEY...") : std::string(KeyName(key));
                         if (ImGui::Button(button.c_str(), ImVec2(-1.0f, 0.0f))) g_rebindingKey = &key;
                         if (waiting && g_editorInputWindow) {
                             for (int candidate = 32; candidate <= GLFW_KEY_LAST; ++candidate) {
@@ -3100,21 +3441,21 @@ void DrawEditorUI(
                     keyCell("Toggle Model", editorCfg.keyToggleModel);
                     ImGui::EndTable();
                     ImGui::Spacing();
-                    ImGui::TextDisabled("Mouse orbit, pan and wheel zoom use the mouse and are not remappable.");
+                    ImGui::TextDisabled(Tr("Mouse orbit, pan and wheel zoom use the mouse and are not remappable."));
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Viewport")) {
+                if (ImGui::BeginTabItem(Tr("Viewport"))) {
                     const std::string customDisplayName = editorCfg.customThemeName.empty() ? "My Theme" : editorCfg.customThemeName;
                     const bool customSelected = editorCfg.hasCustomTheme && editorCfg.themeName == customDisplayName;
 
-                    ImGui::TextUnformatted("Themes");
-                    ImGui::BeginTable("ThemeTop", 1, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV);
+                    ImGui::TextUnformatted(Tr("Themes"));
+                    ImGui::BeginTable(Tr("ThemeTop"), 1, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV);
                     ImGui::TableNextColumn();
-                    if (ImGui::BeginCombo("##Theme", customSelected ? customDisplayName.c_str() : editorCfg.themeName.c_str())) {
+                    if (ImGui::BeginCombo(Tr("##Theme"), customSelected ? customDisplayName.c_str() : Tr(editorCfg.themeName.c_str()))) {
                         const char* builtins[] = {"ImGui", "Pastel Pink", "Pastel Green", "AMOLED"};
                         for (const char* theme : builtins) {
                             const bool selected = editorCfg.themeName == theme;
-                            if (ImGui::Selectable(theme, selected)) {
+                            if (ImGui::Selectable(Tr(theme), selected)) {
                                 editorCfg.themeName = theme;
                                 ApplyTheme(editorCfg);
                             }
@@ -3133,20 +3474,20 @@ void DrawEditorUI(
                     static char newThemeName[128] = {};
                     static bool createThemeWindow = false;
 
-                    ImGui::BeginTable("ThemeActions", editorCfg.hasCustomTheme ? 3 : 2, ImGuiTableFlags_SizingStretchSame);
+                    ImGui::BeginTable(Tr("ThemeActions"), editorCfg.hasCustomTheme ? 3 : 2, ImGuiTableFlags_SizingStretchSame);
                     ImGui::TableNextColumn();
-                    if (ImGui::Button("Create Theme", ImVec2(-1.0f, 0.0f))) {
+                    if (ImGui::Button(Tr("Create Theme"), ImVec2(-1.0f, 0.0f))) {
                         newThemeName[0] = '\0';
                         createThemeWindow = true;
                     }
                     ImGui::TableNextColumn();
-                    if (ImGui::Button("Apply", ImVec2(-1.0f, 0.0f))) {
+                    if (ImGui::Button(Tr("Apply"), ImVec2(-1.0f, 0.0f))) {
                         ApplyTheme(editorCfg);
                         appliedTheme = editorCfg.themeName;
                     }
                     if (editorCfg.hasCustomTheme) {
                         ImGui::TableNextColumn();
-                        if (ImGui::Button("Delete Custom", ImVec2(-1.0f, 0.0f))) {
+                        if (ImGui::Button(Tr("Delete Custom"), ImVec2(-1.0f, 0.0f))) {
                             editorCfg.hasCustomTheme = false;
                             editorCfg.themeName = "ImGui";
                             ApplyTheme(editorCfg);
@@ -3157,12 +3498,12 @@ void DrawEditorUI(
 
                     if (createThemeWindow) {
                         ImGui::SetNextWindowSize(ImVec2(360.0f, 0.0f), ImGuiCond_Always);
-                        if (ImGui::Begin("Create Theme", &createThemeWindow, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
-                            ImGui::TextUnformatted("Theme Name");
+                        if (ImGui::Begin(Tr("Create Theme"), &createThemeWindow, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+                            ImGui::TextUnformatted(Tr("Theme Name"));
                             ImGui::SetNextItemWidth(-1.0f);
-                            ImGui::InputText("##NewThemeName", newThemeName, sizeof(newThemeName));
+                            ImGui::InputText(Tr("##NewThemeName"), newThemeName, sizeof(newThemeName));
                             ImGui::Spacing();
-                            if (ImGui::Button("Create", ImVec2(150.0f, 0.0f))) {
+                            if (ImGui::Button(Tr("Create"), ImVec2(150.0f, 0.0f))) {
                                 std::string name = newThemeName[0] ? std::string(newThemeName) : "My Theme";
                                 if (IsPresetTheme(name)) name += " Custom";
                                 CaptureTheme(editorCfg);
@@ -3176,7 +3517,7 @@ void DrawEditorUI(
                                 newThemeName[0] = '\0';
                             }
                             ImGui::SameLine();
-                            if (ImGui::Button("Cancel", ImVec2(150.0f, 0.0f))) {
+                            if (ImGui::Button(Tr("Cancel"), ImVec2(150.0f, 0.0f))) {
                                 createThemeWindow = false;
                                 newThemeName[0] = '\0';
                             }
@@ -3188,15 +3529,15 @@ void DrawEditorUI(
                     if (customSelected) {
                         bool changedTheme = false;
                         const float cellWidth = (ImGui::GetContentRegionAvail().x - 5.0f * ImGui::GetStyle().ItemSpacing.x) / 6.0f;
-                        ImGui::BeginTable("ThemeColorGrid", 6, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersInnerH);
+                        ImGui::BeginTable(Tr("ThemeColorGrid"), 6, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersInnerH);
                         const auto drawColor = [&](const char* label, float* color, bool alpha = true) {
                             ImGui::TableNextColumn();
                             ImGui::PushID(label);
-                            ImGui::TextUnformatted(label);
+                            ImGui::TextUnformatted(Tr(label));
                             ImGui::SetNextItemWidth(std::max(40.0f, cellWidth));
                             changedTheme |= alpha
-                                ? ImGui::ColorEdit4("##Color", color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)
-                                : ImGui::ColorEdit3("##Color", color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
+                                ? ImGui::ColorEdit4(Tr("##Color"), color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel)
+                                : ImGui::ColorEdit3(Tr("##Color"), color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel);
                             ImGui::PopID();
                         };
                         drawColor("Window", editorCfg.customThemeWindowBg);
@@ -3238,15 +3579,15 @@ void DrawEditorUI(
                         ImGui::EndTable();
                         if (changedTheme) ApplyTheme(editorCfg);
                     } else {
-                        ImGui::TextDisabled("Select a custom theme to edit colors.");
+                        ImGui::TextDisabled(Tr("Select a custom theme to edit colors."));
                     }
 
                     ImGui::Separator();
-                    ImGui::TextUnformatted("Skybox");
+                    ImGui::TextUnformatted(Tr("Skybox"));
                     const char* currentSkybox = editorCfg.skyboxName.empty() ? "None" : editorCfg.skyboxName.c_str();
                     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.58f);
-                    if (ImGui::BeginCombo("##Skybox", currentSkybox)) {
-                        if (ImGui::Selectable("None", editorCfg.skyboxName.empty())) {
+                    if (ImGui::BeginCombo(Tr("##Skybox"), currentSkybox)) {
+                        if (ImGui::Selectable(Tr("None"), editorCfg.skyboxName.empty())) {
                             editorCfg.skyboxName.clear();
                             if (skyboxTexture) { glDeleteTextures(1, &skyboxTexture); skyboxTexture = 0; }
                         }
@@ -3264,7 +3605,7 @@ void DrawEditorUI(
                         ImGui::EndCombo();
                     }
                     ImGui::TextDisabled(skyboxes.empty()
-                        ? "No skyboxes found. Expected six files in gfx/env: namebk, namelf, namert, nameft, nameup, namedn."
+                        ? Tr("No skyboxes found. Expected six files in gfx/env: namebk, namelf, namert, nameft, nameup, namedn.")
                         : "Expected six files in gfx/env: namebk, namelf, namert, nameft, nameup, namedn.");
                     ImGui::EndTabItem();
                 }
@@ -3272,7 +3613,7 @@ void DrawEditorUI(
             }
             ImGui::Separator();
             ImGui::SetCursorPosX(ImGui::GetContentRegionAvail().x - 148.0f);
-            if (ImGui::Button("Save Settings", ImVec2(140.0f, 0.0f))) {
+            if (ImGui::Button(Tr("Save Settings"), ImVec2(140.0f, 0.0f))) {
                 editorCfg.gamePath = gameRootPath.string();
                 editorCfg.lightMode = lightMode;
                 SaveConfig(editorCfg);
@@ -3283,7 +3624,7 @@ void DrawEditorUI(
         ImGui::PopStyleColor(2);
     }
 
-    if (g_showAbout) ImGui::OpenPopup("About MatEdit");
+    if (g_showAbout) ImGui::OpenPopup(Tr("About MatEdit"));
     const float aboutWidth = std::clamp(width * 0.62f, 560.0f, 760.0f);
     static bool aboutWasOpen = false;
     static int aboutLastDisplayW = 0;
@@ -3296,29 +3637,29 @@ void DrawEditorUI(
     aboutLastDisplayW = display_w;
     aboutLastDisplayH = display_h;
     aboutWasOpen = g_showAbout;
-    if (ImGui::BeginPopupModal("About MatEdit", &g_showAbout, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::Text("MatEdit");
+    if (ImGui::BeginPopupModal(Tr("About MatEdit"), &g_showAbout, ImGuiWindowFlags_NoCollapse)) {
+        ImGui::Text(Tr("MatEdit"));
         ImGui::Separator();
-        ImGui::TextWrapped("Material Editor for PrimeXT and similar projects running on Xash3D / Xash3D FWGS.");
-        ImGui::TextWrapped("Created for editing game materials, textures and related material definitions used by these projects.");
+        ImGui::TextWrapped(Tr("Material Editor for PrimeXT and similar projects running on Xash3D / Xash3D FWGS."));
+        ImGui::TextWrapped(Tr("Created for editing game materials, textures and related material definitions used by these projects."));
         ImGui::Spacing();
-        ImGui::TextWrapped("Author: hgruntt");
-        ImGui::TextWrapped("License: GPL-3.0");
-        ImGui::TextWrapped("MatEdit is absolutely free. If somebody charged you money for this program, you were scammed.");
+        ImGui::TextWrapped(Tr("Author: hgruntt"));
+        ImGui::TextWrapped(Tr("License: GPL-3.0"));
+        ImGui::TextWrapped(Tr("MatEdit is absolutely free. If somebody charged you money for this program, you were scammed."));
         ImGui::Spacing();
-        ImGui::TextWrapped("Third-party components include Dear ImGui, GLFW, GLM, GLI, GLAD and stb_image, each distributed under its respective license.");
+        ImGui::TextWrapped(Tr("Third-party components include Dear ImGui, GLFW, GLM, GLI, GLAD and stb_image, each distributed under its respective license."));
         ImGui::Spacing();
-        ImGui::TextDisabled("PROJECT CONTRIBUTORS");
+        ImGui::TextDisabled(Tr("PROJECT CONTRIBUTORS"));
         const std::vector<std::string> contributors = GetContributors();
-        ImGui::BeginChild("##ProjectContributors", ImVec2(0.0f, 120.0f), true);
+        ImGui::BeginChild(Tr("##ProjectContributors"), ImVec2(0.0f, 120.0f), true);
         if (contributors.empty()) {
-            ImGui::TextDisabled("Contributor list is not available yet.");
+            ImGui::TextDisabled(Tr("Contributor list is not available yet."));
         } else {
-            for (const auto& contributor : contributors) ImGui::BulletText("%s", contributor.c_str());
+            for (const auto& contributor : contributors) ImGui::BulletText(Tr("%s"), contributor.c_str());
         }
         ImGui::EndChild();
         ImGui::Spacing();
-        if (ImGui::Button("OK", ImVec2(140.0f, 0.0f))) {
+        if (ImGui::Button(Tr("OK"), ImVec2(140.0f, 0.0f))) {
             g_showAbout = false;
             ImGui::CloseCurrentPopup();
         }
@@ -3416,4 +3757,3 @@ void InitUI() {
     c[ImGuiCol_HeaderHovered] = ImVec4(0.30f, 0.46f, 0.69f, 0.80f);
     c[ImGuiCol_HeaderActive] = ImVec4(0.36f, 0.55f, 0.83f, 1.0f);
 }
-

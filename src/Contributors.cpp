@@ -1,4 +1,5 @@
 #include "Contributors.h"
+#include "Config.h"
 
 #include <algorithm>
 #include <array>
@@ -81,19 +82,32 @@ std::vector<std::string> ReadListFile(const fs::path& path) {
 }
 
 bool SaveCache(const std::vector<std::string>& usernames) {
-    const fs::path cachePath = GetExecutableDirectory() / "contributors_cache.txt";
+    const fs::path cachePath = GetConfigDirectory() / "contributors_cache.txt";
+    std::error_code directoryError;
+    fs::create_directories(cachePath.parent_path(), directoryError);
+    if (directoryError) {
+        std::fprintf(stderr, "MatEdit: could not create contributor cache directory '%s': %s\n",
+                     cachePath.parent_path().string().c_str(), directoryError.message().c_str());
+        return false;
+    }
     const fs::path temporaryPath = cachePath.string() + ".tmp";
     std::ofstream file(temporaryPath, std::ios::binary | std::ios::trunc);
-    if (!file) return false;
+    if (!file) {
+        std::fprintf(stderr, "MatEdit: could not open contributor cache '%s' for writing\n", temporaryPath.string().c_str());
+        return false;
+    }
     for (const auto& username : usernames) file << username << '\n';
     file.close();
     if (!file) {
+        std::fprintf(stderr, "MatEdit: could not write contributor cache '%s'\n", temporaryPath.string().c_str());
         std::error_code ec;
         fs::remove(temporaryPath, ec);
         return false;
     }
 #ifdef _WIN32
     if (!MoveFileExW(temporaryPath.c_str(), cachePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::fprintf(stderr, "MatEdit: could not replace contributor cache '%s' (Windows error %lu)\n",
+                     cachePath.string().c_str(), static_cast<unsigned long>(GetLastError()));
         std::error_code ec;
         fs::remove(temporaryPath, ec);
         return false;
@@ -102,6 +116,8 @@ bool SaveCache(const std::vector<std::string>& usernames) {
     std::error_code ec;
     fs::rename(temporaryPath, cachePath, ec);
     if (ec) {
+        std::fprintf(stderr, "MatEdit: could not replace contributor cache '%s': %s\n",
+                     cachePath.string().c_str(), ec.message().c_str());
         fs::remove(temporaryPath, ec);
         return false;
     }
@@ -207,9 +223,10 @@ void StartContributorRefresh() {
     if (g_refreshStarted) return;
     g_refreshStarted = true;
 
-    const fs::path directory = GetExecutableDirectory();
-    std::vector<std::string> initial = ReadListFile(directory / "contributors_cache.txt");
-    if (initial.empty()) initial = ReadListFile(directory / "CONTRIBUTORS.txt");
+    const fs::path executableDirectory = GetExecutableDirectory();
+    std::vector<std::string> initial = ReadListFile(GetConfigDirectory() / "contributors_cache.txt");
+    if (initial.empty()) initial = ReadListFile(executableDirectory / "contributors_cache.txt");
+    if (initial.empty()) initial = ReadListFile(executableDirectory / "CONTRIBUTORS.txt");
     {
         std::lock_guard<std::mutex> lock(g_contributorsMutex);
         g_contributors = std::move(initial);

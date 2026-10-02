@@ -1,4 +1,5 @@
 #pragma once
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,10 @@ struct EditorConfig {
     float dynamicLightSpeed = 1.0f;
     float dynamicLightRadius = 3.0f;
     bool autoLoadWads = true;
+    bool vsyncEnabled = true;
+    bool textureFilteringEnabled = true;
+    bool autoAssignMaterialTextures = true;
+    std::string language = "en";
     int backgroundMode = 0;
     float backgroundColor[3] = {0.10f, 0.10f, 0.10f};
     std::string skyboxName = "";
@@ -78,3 +83,4 @@ struct EditorConfig {
 
 void LoadConfig(EditorConfig& cfg);
 void SaveConfig(const EditorConfig& cfg);
+std::filesystem::path GetConfigDirectory();
