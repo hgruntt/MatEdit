@@ -62,6 +62,10 @@ uniform vec3 lightColor;
 uniform float lightIntensity;
 uniform float smoothness;
 uniform float glossIntensity;
+uniform float normalIntensity;
+uniform float lumaIntensity;
+uniform float bumpIntensity;
+uniform float detailIntensity;
 uniform float reflectScale;
 uniform float reliefScale;
 uniform float refractScale;
@@ -104,7 +108,7 @@ float GetPrimeXTNormalZ(const vec2 texCoord) {
 }
 
 vec2 ParallaxOffsetMap(const vec2 texCoord, const vec3 viewVec) {
-    float bumpScale = reliefScale * 0.1;
+    float bumpScale = reliefScale * clamp(bumpIntensity, 0.0, 1.0) * 0.1;
     vec3 newCoords = vec3(texCoord, 0.0);
     float lod = ComputeLOD(texCoord);
 
@@ -121,7 +125,7 @@ vec2 ParallaxOffsetMap(const vec2 texCoord, const vec3 viewVec) {
 vec3 ParallaxOcclusionMap(const vec2 texCoord, const vec3 viewVec) {
     const float PARALLAX_STEPS = 15.0;
     float stepSize = 1.0 / PARALLAX_STEPS;
-    float bumpScale = 0.2 * reliefScale;
+    float bumpScale = 0.2 * reliefScale * clamp(bumpIntensity, 0.0, 1.0);
     float lod = ComputeLOD(texCoord);
 
     vec2 delta = bumpScale * vec2(viewVec.x, -viewVec.y) / (viewVec.z * PARALLAX_STEPS);
@@ -209,7 +213,7 @@ void main() {
     vec2 sampledTexCoord = tiledTexCoord;
     float shadowFactor = 1.0;
 
-    if (useBump == 1 && reliefScale > 0.0) {
+    if (useBump == 1 && reliefScale > 0.0 && bumpIntensity > 0.0) {
         vec3 tangentView = normalize(viewDirTangent);
         vec3 pomResult = ParallaxOcclusionMap(tiledTexCoord, tangentView);
         sampledTexCoord = pomResult.xy;
@@ -226,7 +230,7 @@ void main() {
 
     if (useDetail == 1) {
         vec3 detail = texture(detailMap, tiledTexCoord * detailScale).rgb;
-        baseColor *= detail * 2.0;
+        baseColor *= mix(vec3(1.0), detail * 2.0, clamp(detailIntensity, 0.0, 1.0));
     }
 
     vec3 tangentSurfaceNormal = vec3(0.0, 0.0, 1.0);
@@ -246,7 +250,7 @@ void main() {
     }
 
     if (useNormal == 1) {
-        N = normalize(TBN * tangentSurfaceNormal);
+        N = normalize(TBN * normalize(mix(vec3(0.0, 0.0, 1.0), tangentSurfaceNormal, clamp(normalIntensity, 0.0, 1.0))));
     }
 
     float glossSpecularIntensity = clamp(smoothness, 0.0, 1.0);
@@ -269,7 +273,7 @@ void main() {
     vec3 lighting = ambient + directDiffuse + directSpecular;
 
     if (useLuma == 1) {
-        lighting += texture(lumaMap, sampledTexCoord).rgb;
+        lighting += texture(lumaMap, sampledTexCoord).rgb * clamp(lumaIntensity, 0.0, 1.0);
     }
 
     vec3 reflection = vec3(0.0);

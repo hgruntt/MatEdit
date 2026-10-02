@@ -2539,6 +2539,10 @@ void DrawEditorPanels(
     bool& useBump,
     float& lightIntensity,
     float& glossIntensity,
+    float& normalIntensity,
+    float& lumaIntensity,
+    float& bumpIntensity,
+    float& detailIntensity,
     float* lightColor,
     std::function<void(std::string&, int&)> refreshDataFunc
 ) {
@@ -2745,10 +2749,32 @@ void DrawEditorPanels(
             ImGui::SameLine();
             ImGui::BeginChild(Tr("MatLightChild"), ImVec2(colWidth, panelHeight), true, ImGuiWindowFlags_NoScrollbar);
             ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_HeaderActive], "%s", Tr("Lighting & Maps"));
-            DrawCheckbox(Tr("Normal Map"), &useNormal);
-            DrawCheckbox(Tr("Gloss Map"), &useGloss);
-            DrawCheckbox(Tr("Luma Map"), &useLuma);
-            DrawCheckbox(Tr("Use Bump"), &useBump);
+            const bool hasSelectedMaterial = !materials.empty() && currentMatIndex >= 0 &&
+                static_cast<std::size_t>(currentMatIndex) < materials.size();
+            bool unavailableDetail = false;
+            bool& detailEnabled = hasSelectedMaterial ? materials[currentMatIndex].detailVisible : unavailableDetail;
+            if (ImGui::BeginTable("##MapIntensityGrid", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
+                const auto mapRow = [](const char* mapLabel, bool* enabled, const char* intensityLabel, float* intensity) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    DrawCheckbox(Tr(mapLabel), enabled);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::SetNextItemWidth(-1.0f);
+                    ImGui::SliderFloat(Tr(intensityLabel), intensity, 0.0f, 1.0f, "%.2f");
+                };
+                mapRow("Normal Map", &useNormal, "Normal Intensity", &normalIntensity);
+                mapRow("Gloss Map", &useGloss, "Gloss Intensity", &glossIntensity);
+                mapRow("Luma Map", &useLuma, "Luma Intensity", &lumaIntensity);
+                mapRow("Use Bump", &useBump, "Bump Intensity", &bumpIntensity);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                if (hasSelectedMaterial) DrawCheckbox(Tr("Detail"), &detailEnabled);
+                else ImGui::TextDisabled(Tr("Detail"));
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::SliderFloat(Tr("Detail Intensity"), &detailIntensity, 0.0f, 1.0f, "%.2f");
+                ImGui::EndTable();
+            }
             const char* lightModeItems[] = {Tr("Camera"), Tr("Fixed"), Tr("Dynamic")};
             ImGui::Combo(Tr("Light Mode"), &lightMode, lightModeItems, static_cast<int>(std::size(lightModeItems)));
             if (lightMode == 2) {
@@ -2759,8 +2785,11 @@ void DrawEditorPanels(
             ImGui::SliderFloat(Tr("Intensity"), &lightIntensity, 0.0f, intensityMax);
             lightIntensity = std::clamp(lightIntensity, 0.0f, intensityMax);
             ImGui::ColorEdit3(Tr("Color"), lightColor);
-            ImGui::SliderFloat(Tr("Gloss Intensity"), &glossIntensity, 0.0f, 1.0f, "%.2f");
             glossIntensity = std::clamp(glossIntensity, 0.0f, 1.0f);
+            normalIntensity = std::clamp(normalIntensity, 0.0f, 1.0f);
+            lumaIntensity = std::clamp(lumaIntensity, 0.0f, 1.0f);
+            bumpIntensity = std::clamp(bumpIntensity, 0.0f, 1.0f);
+            detailIntensity = std::clamp(detailIntensity, 0.0f, 1.0f);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
@@ -2875,6 +2904,10 @@ void DrawEditorUI(
     bool& useBump,
     float& lightIntensity,
     float& glossIntensity,
+    float& normalIntensity,
+    float& lumaIntensity,
+    float& bumpIntensity,
+    float& detailIntensity,
     float* lightColor,
     GLuint& skyboxTexture,
     std::function<void(std::string&, int&)> refreshDataFunc
@@ -3136,7 +3169,8 @@ void DrawEditorUI(
         DrawEditorPanels(display_w, display_h, editorCfg, materials, physicalMaterials, matFiles,
                             currentFileName, currentMatIndex, currentDefFile, currentPhysMatIndex,
                             shapeType, modelVisible, lightMode, useNormal, useGloss, useLuma, useBump,
-                            lightIntensity, glossIntensity, lightColor, refreshDataFunc);
+                            lightIntensity, glossIntensity, normalIntensity, lumaIntensity, bumpIntensity, detailIntensity,
+                            lightColor, refreshDataFunc);
         ImGui::EndChild();
     }
     }

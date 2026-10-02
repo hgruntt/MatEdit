@@ -419,6 +419,10 @@ int main() {
     bool useBump = editorCfg.useBump;
     float lightIntensity = 1.0f;
     float glossIntensity = 1.0f;
+    float normalIntensity = 1.0f;
+    float lumaIntensity = 1.0f;
+    float bumpIntensity = 1.0f;
+    float detailIntensity = 1.0f;
     float lightColor[3] = {1.0f, 1.0f, 1.0f};
     double fpsTime = glfwGetTime();
     int fpsFrames = 0;
@@ -607,6 +611,10 @@ int main() {
         GLint reflectScale;
         GLint smoothness;
         GLint glossIntensity;
+        GLint normalIntensity;
+        GLint lumaIntensity;
+        GLint bumpIntensity;
+        GLint detailIntensity;
         GLint reliefScale;
         GLint refractScale;
         GLint aberrationScale;
@@ -646,6 +654,10 @@ int main() {
               reflectScale(glGetUniformLocation(program, "reflectScale")),
               smoothness(glGetUniformLocation(program, "smoothness")),
               glossIntensity(glGetUniformLocation(program, "glossIntensity")),
+              normalIntensity(glGetUniformLocation(program, "normalIntensity")),
+              lumaIntensity(glGetUniformLocation(program, "lumaIntensity")),
+              bumpIntensity(glGetUniformLocation(program, "bumpIntensity")),
+              detailIntensity(glGetUniformLocation(program, "detailIntensity")),
               reliefScale(glGetUniformLocation(program, "reliefScale")),
               refractScale(glGetUniformLocation(program, "refractScale")),
               aberrationScale(glGetUniformLocation(program, "aberrationScale")),
@@ -790,7 +802,8 @@ int main() {
 
         DrawEditorUI(window_w, window_h, editorCfg, materials, physicalMaterials, matFiles, defFiles, ddsFiles, currentFileName, currentMatIndex,
                      currentDefFile, currentPhysMatIndex, shapeType, modelVisible, lightMode, useNormal, useGloss, useLuma, useBump,
-                     lightIntensity, glossIntensity, lightColor, skyboxTexture, refreshData);
+                     lightIntensity, glossIntensity, normalIntensity, lumaIntensity, bumpIntensity, detailIntensity,
+                     lightColor, skyboxTexture, refreshData);
 
         static float yaw = 0.0f;
         static float pitch = 0.0f;
@@ -965,6 +978,10 @@ int main() {
         glUniform3fv(uniforms.lightPos, 1, &finalLightPos.x);
         glUniform1f(uniforms.lightIntensity, lightIntensity);
         glUniform1f(uniforms.glossIntensity, glossIntensity);
+        glUniform1f(uniforms.normalIntensity, normalIntensity);
+        glUniform1f(uniforms.lumaIntensity, lumaIntensity);
+        glUniform1f(uniforms.bumpIntensity, bumpIntensity);
+        glUniform1f(uniforms.detailIntensity, detailIntensity);
         glUniform3fv(uniforms.lightColor, 1, lightColor);
         glUniform3fv(uniforms.albedo, 1, &albedo.r);
         glUniform1f(uniforms.metallic, metallic);
