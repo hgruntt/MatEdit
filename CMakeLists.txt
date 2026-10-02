@@ -68,6 +68,25 @@ target_include_directories(gli INTERFACE
     "${EXTERNAL_DIR}/gli"
 )
 
+add_executable(imgui_font_compressor
+    "${EXTERNAL_DIR}/imgui/misc/fonts/binary_to_compressed_c.cpp"
+)
+
+set(EMBEDDED_FONT_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/EmbeddedUiFont.cpp")
+add_custom_command(
+    OUTPUT "${EMBEDDED_FONT_SOURCE}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DCOMPRESSOR=$<TARGET_FILE:imgui_font_compressor>"
+        "-DFONT_FILE=${EXTERNAL_DIR}/imgui/misc/fonts/Roboto-Medium.ttf"
+        "-DOUTPUT_FILE=${EMBEDDED_FONT_SOURCE}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedFont.cmake"
+    DEPENDS
+        imgui_font_compressor
+        "${EXTERNAL_DIR}/imgui/misc/fonts/Roboto-Medium.ttf"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateEmbeddedFont.cmake"
+    VERBATIM
+)
+
 add_executable(MaterialEditor
     src/EditorUI.cpp
     src/MaterialSystem.cpp
@@ -79,6 +98,7 @@ add_executable(MaterialEditor
     src/Contributors.cpp
     src/I18n.cpp
     src/main.cpp
+    "${EMBEDDED_FONT_SOURCE}"
 )
 
 if(WIN32)
@@ -94,10 +114,6 @@ target_include_directories(MaterialEditor PRIVATE
     "${EXTERNAL_DIR}/glm"
     "${EXTERNAL_DIR}/gli"
     "${STB_INCLUDE_DIR}"
-)
-
-target_compile_definitions(MaterialEditor PRIVATE
-    MATEDIT_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/misc/fonts/Roboto-Medium.ttf"
 )
 
     target_link_libraries(MaterialEditor PRIVATE

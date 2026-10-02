@@ -37,6 +37,8 @@ static std::string ToLower(std::string value) {
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 
+ImFont* AddEmbeddedUiFont(float size);
+
 struct MeshData {
     std::vector<float> vertices;
     std::vector<unsigned int> indices;
@@ -732,17 +734,12 @@ int main() {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-#ifdef MATEDIT_FONT_PATH
-    ImFont* uiFont = ImGui::GetIO().Fonts->AddFontFromFileTTF(
-        MATEDIT_FONT_PATH, 13.0f, nullptr, ImGui::GetIO().Fonts->GetGlyphRangesCyrillic());
+    ImFont* uiFont = AddEmbeddedUiFont(13.0f);
     if (uiFont) {
         ImGui::GetIO().FontDefault = uiFont;
     } else {
-        std::cerr << "Failed to load UI font with Cyrillic glyphs: " << MATEDIT_FONT_PATH << '\n';
+        std::cerr << "Failed to load embedded UI font.\n";
     }
-#else
-    ImGui::GetIO().Fonts->AddFontDefault();
-#endif
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
     InitUI();
