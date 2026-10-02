@@ -61,6 +61,7 @@ uniform vec3 viewPos;
 uniform vec3 lightColor;
 uniform float lightIntensity;
 uniform float smoothness;
+uniform float glossIntensity;
 uniform float reflectScale;
 uniform float reliefScale;
 uniform float refractScale;
@@ -255,6 +256,7 @@ void main() {
         vec3 glossColor = glossIsSRGB == 1 ? glossData.rgb : SRGBToLinear(glossData.rgb);
         glossSpecularIntensity = clamp(glossColor.r, 0.0, 1.0);
     }
+    glossSpecularIntensity *= clamp(glossIntensity, 0.0, 1.0);
 
     float NdotL = max(dot(N, L), 0.0);
     vec3 H = normalize(V + L);

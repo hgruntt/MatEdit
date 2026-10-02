@@ -43,6 +43,7 @@ const std::unordered_map<std::string, std::string> ru = {
     {"Normal", "Нормали"}, {"Gloss", "Глянец"}, {"Luma", "Свечение"},
     {"Bump", "Рельеф"}, {"Detail", "Детали"},
     {"Smoothness", "Гладкость"}, {"Reflect", "Отражение"},
+    {"Gloss Intensity", "Интенсивность глянца"},
     {"Relief", "Рельеф"}, {"Refract", "Преломление"},
     {"Abberation", "Аберрация"}, {"Texture Tiling", "Масштаб текстуры"},
     {"Symmetric", "Симметрично"}, {"Phys Material", "Физический материал"},

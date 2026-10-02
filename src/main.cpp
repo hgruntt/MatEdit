@@ -418,6 +418,7 @@ int main() {
     bool useLuma = editorCfg.useLuma;
     bool useBump = editorCfg.useBump;
     float lightIntensity = 1.0f;
+    float glossIntensity = 1.0f;
     float lightColor[3] = {1.0f, 1.0f, 1.0f};
     double fpsTime = glfwGetTime();
     int fpsFrames = 0;
@@ -605,6 +606,7 @@ int main() {
         GLint roughness;
         GLint reflectScale;
         GLint smoothness;
+        GLint glossIntensity;
         GLint reliefScale;
         GLint refractScale;
         GLint aberrationScale;
@@ -643,6 +645,7 @@ int main() {
               roughness(glGetUniformLocation(program, "roughness")),
               reflectScale(glGetUniformLocation(program, "reflectScale")),
               smoothness(glGetUniformLocation(program, "smoothness")),
+              glossIntensity(glGetUniformLocation(program, "glossIntensity")),
               reliefScale(glGetUniformLocation(program, "reliefScale")),
               refractScale(glGetUniformLocation(program, "refractScale")),
               aberrationScale(glGetUniformLocation(program, "aberrationScale")),
@@ -787,7 +790,7 @@ int main() {
 
         DrawEditorUI(window_w, window_h, editorCfg, materials, physicalMaterials, matFiles, defFiles, ddsFiles, currentFileName, currentMatIndex,
                      currentDefFile, currentPhysMatIndex, shapeType, modelVisible, lightMode, useNormal, useGloss, useLuma, useBump,
-                     lightIntensity, lightColor, skyboxTexture, refreshData);
+                     lightIntensity, glossIntensity, lightColor, skyboxTexture, refreshData);
 
         static float yaw = 0.0f;
         static float pitch = 0.0f;
@@ -961,6 +964,7 @@ int main() {
         glUniform3fv(uniforms.viewPos, 1, &cameraPos.x);
         glUniform3fv(uniforms.lightPos, 1, &finalLightPos.x);
         glUniform1f(uniforms.lightIntensity, lightIntensity);
+        glUniform1f(uniforms.glossIntensity, glossIntensity);
         glUniform3fv(uniforms.lightColor, 1, lightColor);
         glUniform3fv(uniforms.albedo, 1, &albedo.r);
         glUniform1f(uniforms.metallic, metallic);

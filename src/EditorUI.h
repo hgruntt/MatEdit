@@ -35,6 +35,7 @@ void DrawEditorUI(
     bool& useLuma,
     bool& useBump,
     float& lightIntensity,
+    float& glossIntensity,
     float* lightColor,
     GLuint& skyboxTexture,
     std::function<void(std::string&, int&)> refreshDataFunc

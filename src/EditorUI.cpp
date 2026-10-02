@@ -2538,6 +2538,7 @@ void DrawEditorPanels(
     bool& useLuma,
     bool& useBump,
     float& lightIntensity,
+    float& glossIntensity,
     float* lightColor,
     std::function<void(std::string&, int&)> refreshDataFunc
 ) {
@@ -2758,6 +2759,8 @@ void DrawEditorPanels(
             ImGui::SliderFloat(Tr("Intensity"), &lightIntensity, 0.0f, intensityMax);
             lightIntensity = std::clamp(lightIntensity, 0.0f, intensityMax);
             ImGui::ColorEdit3(Tr("Color"), lightColor);
+            ImGui::SliderFloat(Tr("Gloss Intensity"), &glossIntensity, 0.0f, 1.0f, "%.2f");
+            glossIntensity = std::clamp(glossIntensity, 0.0f, 1.0f);
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
@@ -2871,6 +2874,7 @@ void DrawEditorUI(
     bool& useLuma,
     bool& useBump,
     float& lightIntensity,
+    float& glossIntensity,
     float* lightColor,
     GLuint& skyboxTexture,
     std::function<void(std::string&, int&)> refreshDataFunc
@@ -3132,7 +3136,7 @@ void DrawEditorUI(
         DrawEditorPanels(display_w, display_h, editorCfg, materials, physicalMaterials, matFiles,
                             currentFileName, currentMatIndex, currentDefFile, currentPhysMatIndex,
                             shapeType, modelVisible, lightMode, useNormal, useGloss, useLuma, useBump,
-                            lightIntensity, lightColor, refreshDataFunc);
+                            lightIntensity, glossIntensity, lightColor, refreshDataFunc);
         ImGui::EndChild();
     }
     }
