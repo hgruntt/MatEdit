@@ -6,9 +6,12 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - SHA256SUMS
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild and republish even if the source commit is unchanged"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -23,10 +26,18 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
+      changed: ${{ steps.version.outputs.changed }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
       pkgver: ${{ steps.version.outputs.pkgver }}
       pkgrel: ${{ steps.version.outputs.pkgrel }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
       - name: Configure SSH
         env:
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
@@ -65,37 +76,66 @@ jobs:
             ssh://aur@aur.archlinux.org/matedit-bin.git \
             aur-bin
 
-      - name: Determine package version
+      - name: Detect source changes and determine version
         id: version
-        working-directory: aur-bin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
         run: |
           set -e
 
-          pkgver=$(date -u +%Y%m%d)
+          source_sha=$(git rev-parse HEAD)
 
-          current_pkgver=$(sed -n 's/^pkgver=//p' PKGBUILD)
-          current_pkgrel=$(sed -n 's/^pkgrel=//p' PKGBUILD)
+          release_body=$(gh release view nightly --json body -q .body 2>/dev/null || true)
+          recorded_sha=$(printf '%s\n' "$release_body" | sed -n 's/^Source-Commit: //p')
+          recorded_pkgver=$(printf '%s\n' "$release_body" | sed -n 's/^Pkgver: //p')
+          recorded_pkgrel=$(printf '%s\n' "$release_body" | sed -n 's/^Pkgrel: //p')
 
-          if [ -z "$current_pkgver" ] || [ -z "$current_pkgrel" ]; then
-            echo "Failed to read pkgver/pkgrel from PKGBUILD"
+          aur_pkgver=$(sed -n 's/^pkgver=//p' aur-bin/PKGBUILD)
+          aur_pkgrel=$(sed -n 's/^pkgrel=//p' aur-bin/PKGBUILD)
+
+          if [ -z "$aur_pkgver" ] || [ -z "$aur_pkgrel" ]; then
+            echo "Failed to read pkgver/pkgrel from AUR PKGBUILD"
             exit 1
           fi
 
-          if [ "$current_pkgver" = "$pkgver" ]; then
-            pkgrel=$((10#$current_pkgrel + 1))
+          if [ "$FORCE" != "true" ] && \
+             [ "$source_sha" = "$recorded_sha" ] && \
+             [ "$aur_pkgver" = "$recorded_pkgver" ] && \
+             [ "$aur_pkgrel" = "$recorded_pkgrel" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nightly ${aur_pkgver}-${aur_pkgrel} is already up to date with ${source_sha}; skipping."
+            exit 0
+          fi
+
+          pkgver=$(date -u -d "@$(git log -1 --format=%ct)" +%Y%m%d)
+
+          if [ "$source_sha" = "$recorded_sha" ]; then
+            if [ "$FORCE" = "true" ]; then
+              pkgrel=$((10#${recorded_pkgrel:-0} + 1))
+            else
+              pkgrel=$recorded_pkgrel
+            fi
+          elif [ "$recorded_pkgver" = "$pkgver" ]; then
+            pkgrel=$((10#${recorded_pkgrel:-0} + 1))
           else
             pkgrel=1
           fi
 
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${source_sha}" >> "$GITHUB_OUTPUT"
           echo "pkgver=${pkgver}" >> "$GITHUB_OUTPUT"
           echo "pkgrel=${pkgrel}" >> "$GITHUB_OUTPUT"
 
-          echo "Current AUR version: ${current_pkgver}-${current_pkgrel}"
+          echo "Source commit: ${source_sha}"
+          echo "Recorded commit: ${recorded_sha:-none}"
+          echo "AUR version: ${aur_pkgver}-${aur_pkgrel}"
           echo "New version: ${pkgver}-${pkgrel}"
 
   build-linux-gcc:
     name: Build Linux x64 GCC
     runs-on: ubuntu-latest
+    if: needs.prepare-version.outputs.changed == 'true'
 
     needs:
       - prepare-version
@@ -163,6 +203,7 @@ jobs:
   build-linux-clang:
     name: Build Linux x64 Clang
     runs-on: ubuntu-latest
+    if: needs.prepare-version.outputs.changed == 'true'
 
     needs:
       - prepare-version
@@ -231,6 +272,7 @@ jobs:
   build-windows:
     name: Build Windows x64 MSVC
     runs-on: windows-latest
+    if: needs.prepare-version.outputs.changed == 'true'
 
     needs:
       - prepare-version
@@ -293,6 +335,7 @@ jobs:
   release:
     name: Publish Nightly Release
     runs-on: ubuntu-latest
+    if: needs.prepare-version.outputs.changed == 'true'
 
     needs:
       - prepare-version
@@ -303,6 +346,7 @@ jobs:
     env:
       PKGVER: ${{ needs.prepare-version.outputs.pkgver }}
       PKGREL: ${{ needs.prepare-version.outputs.pkgrel }}
+      SOURCE_SHA: ${{ needs.prepare-version.outputs.source_sha }}
 
     steps:
       - name: Checkout
@@ -376,36 +420,27 @@ jobs:
         run: |
           set -e
 
+          notes_file=$(mktemp)
+          {
+            echo "Source-Commit: ${SOURCE_SHA}"
+            echo "Pkgver: ${PKGVER}"
+            echo "Pkgrel: ${PKGREL}"
+          } > "$notes_file"
+
           gh release create nightly \
             "release/MatEdit-linux-x64-gcc-${PKGVER}-${PKGREL}.tar.gz" \
             "release/MatEdit-linux-x64-clang-${PKGVER}-${PKGREL}.tar.gz" \
             "release/MatEdit-windows-x64-msvc-${PKGVER}-${PKGREL}.zip" \
+            "SHA256SUMS" \
             --target "${GITHUB_SHA}" \
             --title "MatEdit Nightly ${PKGVER}-${PKGREL}" \
+            --notes-file "$notes_file" \
             --prerelease
-
-      - name: Commit SHA256SUMS
-        run: |
-          set -e
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add SHA256SUMS
-
-          if git diff --cached --quiet; then
-            echo "SHA256SUMS has no changes"
-            exit 0
-          fi
-
-          git commit \
-            -m "Update release checksums [skip ci]"
-
-          git push origin HEAD:main
 
   deploy-aur:
     name: Deploy AUR package
     runs-on: ubuntu-latest
+    if: needs.prepare-version.outputs.changed == 'true'
 
     needs:
       - prepare-version
@@ -439,6 +474,22 @@ jobs:
           echo "gcc_sha256=${gcc_sha256}" >> "$GITHUB_OUTPUT"
 
           echo "GCC SHA256: ${gcc_sha256}"
+
+      - name: Verify published GCC asset checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GCC_SHA256: ${{ steps.checksum.outputs.gcc_sha256 }}
+        run: |
+          set -e
+
+          gcc_file="MatEdit-linux-x64-gcc-${PKGVER}-${PKGREL}.tar.gz"
+
+          gh release download nightly \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "$gcc_file" \
+            --dir verify
+
+          echo "${GCC_SHA256}  verify/${gcc_file}" | sha256sum -c -
 
       - name: Configure SSH
         env:
